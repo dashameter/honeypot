@@ -27,6 +27,15 @@ type alias CreateVaultArgs =
 port createVault : CreateVaultArgs -> Cmd msg
 
 
+type alias CreateTransactionArgs =
+    { vault : Vault
+    , transactionArgs : TransactionForm
+    }
+
+
+port createTransaction : CreateTransactionArgs -> Cmd msg
+
+
 port searchDashNames : String -> Cmd msg
 
 
@@ -34,6 +43,9 @@ port getdashNameResults : (Json.Decode.Value -> msg) -> Sub msg
 
 
 port getVaults : (Json.Decode.Value -> msg) -> Sub msg
+
+
+port getCreatedVaultId : (String -> msg) -> Sub msg
 
 
 
@@ -44,6 +56,7 @@ subscriptions _ =
     Sub.batch
         [ getVaults GotVaults
         , getdashNameResults GotdashNameResults
+        , getCreatedVaultId ClickedSelectVault
         ]
 
 
@@ -56,6 +69,7 @@ type alias Vault =
     , vaultAddress : String
     , publicKeys : List String
     , identityIds : List String
+    , id : String
     }
 
 
@@ -66,6 +80,7 @@ vaultDecoder =
         |> required "vaultAddress" string
         |> required "publicKeys" (list string)
         |> required "identityIds" (list string)
+        |> required "id" string
 
 
 type alias ResultDashName =
@@ -87,12 +102,33 @@ resultDashNameDecoder =
 
 type alias Model =
     { selectedTx : Int
+    , selectedVaultId : Maybe String
     , vaults : List Vault
     , newVaultIdentityIds : String
     , newVaultDashNames : List ResultDashName
     , newVaultThreshold : String
     , searchDashName : String
     , dashNameResults : List ResultDashName
+    , newTransactionForm : TransactionForm
+    }
+
+
+type alias Input =
+    { txId : String
+    , outputIndex : String
+    , satoshis : String
+    }
+
+
+type alias Output =
+    { address : String
+    , amount : String
+    }
+
+
+type alias TransactionForm =
+    { input : Input
+    , output : Output
     }
 
 
@@ -105,6 +141,18 @@ initialModel =
     , newVaultDashNames = []
     , searchDashName = ""
     , dashNameResults = []
+    , selectedVaultId = Nothing
+    , newTransactionForm =
+        { input =
+            { txId = "140f16060bede8a6a4c14866cc6e0e46b69bdc946d59dea6f08eb5dde376a230"
+            , outputIndex = "0"
+            , satoshis = "1000000"
+            }
+        , output =
+            { address = "yWmaDGGSz1hFxXkVUR6n69E3FqfpQ5qgQn"
+            , amount = "100000"
+            }
+        }
     }
 
 
@@ -128,6 +176,7 @@ filteredDashNameResults model =
 
 type Msg
     = ClickedSearchDashName ResultDashName
+    | ClickedSelectVault String
     | ClickedNewVaultDashName ResultDashName
     | GotVaults Json.Decode.Value
     | GotdashNameResults Json.Decode.Value
@@ -135,11 +184,138 @@ type Msg
     | NewVaultThresholdChanged String
     | CreateVaultPressed
     | SearchDashNameChanged String
+    | PressedAddAnotherVault
+    | ChangedNewTransactionFormInputOutputIndex String
+    | ChangedNewTransactionFormInputSatoshis String
+    | ChangedNewTransactionFormInputTxId String
+    | ChangedNewTransactionFormOutputAmount String
+    | PressedNewTransactionFormCreateTransaction
+    | ChangedNewTransactionFormOutputAddress String
+
+
+digitsOnly : String -> String
+digitsOnly =
+    String.filter Char.isDigit
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        PressedNewTransactionFormCreateTransaction ->
+            let
+                cmd =
+                    createTransaction
+                        { vault = selectedVault model
+                        , transactionArgs = model.newTransactionForm
+                        }
+            in
+            ( model
+            , cmd
+            )
+
+        ChangedNewTransactionFormOutputAddress address ->
+            let
+                oldNewTransactionForm =
+                    model.newTransactionForm
+
+                oldOutput =
+                    oldNewTransactionForm.output
+
+                output =
+                    { oldOutput | address = address }
+
+                newTransactionForm =
+                    { oldNewTransactionForm | output = output }
+            in
+            ( { model
+                | newTransactionForm = newTransactionForm
+              }
+            , Cmd.none
+            )
+
+        ChangedNewTransactionFormInputSatoshis satoshis ->
+            let
+                oldNewTransactionForm =
+                    model.newTransactionForm
+
+                oldInput =
+                    oldNewTransactionForm.input
+
+                input =
+                    { oldInput | satoshis = digitsOnly satoshis }
+
+                newTransactionForm =
+                    { oldNewTransactionForm | input = input }
+            in
+            ( { model
+                | newTransactionForm = newTransactionForm
+              }
+            , Cmd.none
+            )
+
+        ChangedNewTransactionFormInputOutputIndex outputIndex ->
+            let
+                oldNewTransactionForm =
+                    model.newTransactionForm
+
+                oldInput =
+                    oldNewTransactionForm.input
+
+                input =
+                    { oldInput | outputIndex = digitsOnly outputIndex }
+
+                newTransactionForm =
+                    { oldNewTransactionForm | input = input }
+            in
+            ( { model
+                | newTransactionForm = newTransactionForm
+              }
+            , Cmd.none
+            )
+
+        ChangedNewTransactionFormInputTxId txId ->
+            let
+                oldNewTransactionForm =
+                    model.newTransactionForm
+
+                oldInput =
+                    oldNewTransactionForm.input
+
+                input =
+                    { oldInput | txId = txId }
+
+                newTransactionForm =
+                    { oldNewTransactionForm | input = input }
+            in
+            ( { model
+                | newTransactionForm = newTransactionForm
+              }
+            , Cmd.none
+            )
+
+        ChangedNewTransactionFormOutputAmount amount ->
+            let
+                oldNewTransactionForm =
+                    model.newTransactionForm
+
+                oldOutput =
+                    oldNewTransactionForm.output
+
+                output =
+                    { oldOutput | amount = digitsOnly amount }
+
+                newTransactionForm =
+                    { oldNewTransactionForm | output = output }
+            in
+            ( { model
+                | newTransactionForm = newTransactionForm
+              }
+            , Cmd.none
+            )
+
+        PressedAddAnotherVault ->
+            ( { model | selectedVaultId = Nothing }, Cmd.none )
+
         SearchDashNameChanged searchDashName ->
             let
                 cmd =
@@ -163,7 +339,7 @@ update msg model =
 
         NewVaultThresholdChanged newVaultThreshold ->
             ( { model
-                | newVaultThreshold = newVaultThreshold
+                | newVaultThreshold = digitsOnly newVaultThreshold
               }
             , Cmd.none
             )
@@ -191,6 +367,9 @@ update msg model =
                     List.filter (\name -> not (name == dashName)) model.newVaultDashNames
             in
             ( { model | newVaultDashNames = newVaultDashNames }, Cmd.none )
+
+        ClickedSelectVault vaultId ->
+            ( { model | selectedVaultId = Just vaultId }, Cmd.none )
 
 
 
@@ -257,7 +436,7 @@ mainContent model =
 
 leftMenu model =
     let
-        attrs =
+        attrs vault =
             [ Border.shadow
                 { offset = ( 0, 5 )
                 , size = 0
@@ -276,13 +455,14 @@ leftMenu model =
             , mouseOver [ Border.color (Element.rgba255 223 226 161 1) ]
             , Border.solid
             , Border.widthXY 4 4
+            , onClick (ClickedSelectVault vault.id)
             ]
 
         vaultRow vaults =
             List.map
                 (\vault ->
                     Element.column
-                        attrs
+                        (attrs vault)
                         [ Element.el
                             [ Font.color (Element.rgba255 0 103 138 1)
                             , Font.size 24
@@ -483,7 +663,14 @@ resultDashNameOutput model =
 
 
 content model =
-    row [ width fill, height fill ] [ newVaultCard model ]
+    row [ width fill, height fill ]
+        [ case model.selectedVaultId of
+            Just vaultId ->
+                transactionCards model
+
+            Nothing ->
+                newVaultCard model
+        ]
 
 
 newVaultCard model =
@@ -585,16 +772,283 @@ newVaultCard model =
         ]
 
 
+transactionCards model =
+    column
+        [ width fill
+        , height fill
+        , spacing 12
+        ]
+        [ el [ alignRight, paddingXY 8 8 ]
+            (Input.button
+                [ Border.shadow
+                    { offset = ( 0, 2 )
+                    , size = 0
+                    , blur = 15
+                    , color = Element.rgba255 24 164 251 1
+                    }
+                , Background.color (Element.rgba255 24 164 251 1)
+                , Font.center
+                , Font.color (Element.rgba255 255 255 255 1)
+                , Element.paddingXY 16 8
+                , Border.rounded 2
+                , Border.color (Element.rgba255 24 164 251 1)
+                , Border.solid
+                , Border.widthXY 1 1
+                , mouseOver [ Background.color (Element.rgba255 24 195 251 1) ]
+                ]
+                { onPress = Just PressedAddAnotherVault, label = Element.text "Add Another Vault" }
+            )
+        , newTransactionFormCard model
 
--- transactionCards model =
---     column [ width fill ]
---         [ row [ width fill ]
---             [ contentCard model "Transaction Queue"
---             ]
---         , row [ width fill ]
---             [ contentCard model "Transaction History"
---             ]
---         ]
+        -- , row [ width fill ]
+        --     [ contentCard model "Transaction Queue"
+        --     ]
+        -- , row [ width fill ]
+        --     [ contentCar d model "Transaction History"
+        --     ]
+        ]
+
+
+selectedVault : Model -> Vault
+selectedVault model =
+    Maybe.withDefault
+        { id = ""
+        , identityIds = []
+        , publicKeys = []
+        , threshold = 0
+        , vaultAddress = ""
+        }
+    <|
+        List.head <|
+            List.filter (\vault -> vault.id == Maybe.withDefault "" model.selectedVaultId) model.vaults
+
+
+newTransactionFormCard model =
+    Element.column
+        [ Font.color (Element.rgba255 46 52 54 1)
+        , Font.family [ Font.typeface "Rubik" ]
+        , Font.size 16
+        , Element.spacingXY 0 12
+        , centerX
+        , Border.rounded 2
+        , Border.color (Element.rgba255 24 195 251 1)
+        , Border.dashed
+        , Border.widthXY 1 1
+        , paddingXY 12 12
+        ]
+        [ Element.el
+            [ Font.color (Element.rgba255 0 103 138 1)
+            , Font.size 24
+            , Element.height Element.shrink
+            , Element.width Element.shrink
+            ]
+            (Element.text <|
+                String.fromInt (selectedVault model).threshold
+                    --
+                    ++ "/"
+                    ++ String.fromInt
+                        (List.length
+                            (selectedVault model).identityIds
+                        )
+                    ++ " "
+                    ++ (selectedVault model).vaultAddress
+            )
+        , Element.row
+            [ Element.spacingXY 12 0
+            , Element.height Element.shrink
+            , Element.width Element.fill
+            ]
+            [ Input.text
+                [ Border.shadow
+                    { offset = ( 0, 2 )
+                    , size = 0
+                    , blur = 5
+                    , color = Element.rgba255 24 195 251 1
+                    }
+                , Background.color (Element.rgba255 240 251 255 1)
+                , Element.centerX
+                , Font.family [ Font.typeface "Rubik" ]
+                , Font.size 24
+                , Element.spacingXY 0 10
+                , Element.height Element.shrink
+                , Element.width (Element.shrink |> Element.maximum 50)
+                , Element.paddingEach
+                    { top = 16, right = 8, bottom = 8, left = 8 }
+                , Border.rounded 2
+                , Border.color (Element.rgba255 24 195 251 1)
+                , Border.dashed
+                , Border.widthXY 1 1
+                ]
+                { onChange = ChangedNewTransactionFormInputSatoshis
+                , text = model.newTransactionForm.input.satoshis
+                , placeholder = Nothing
+                , label =
+                    Input.labelAbove
+                        [ Font.color (Element.rgba255 24 164 251 1) ]
+                        (Element.text "sats")
+                }
+            , Input.text
+                [ Border.shadow
+                    { offset = ( 0, 2 )
+                    , size = 0
+                    , blur = 5
+                    , color = Element.rgba255 24 195 251 1
+                    }
+                , Background.color (Element.rgba255 240 251 255 1)
+                , Element.centerX
+                , Font.family [ Font.typeface "Rubik" ]
+                , Font.size 24
+                , Element.spacingXY 0 10
+                , Element.height Element.shrink
+                , Element.width (Element.shrink |> Element.maximum 50)
+                , Element.paddingEach
+                    { top = 16, right = 8, bottom = 8, left = 8 }
+                , Border.rounded 2
+                , Border.color (Element.rgba255 24 195 251 1)
+                , Border.dashed
+                , Border.widthXY 1 1
+                ]
+                { onChange = ChangedNewTransactionFormInputOutputIndex
+                , text = model.newTransactionForm.input.outputIndex
+                , placeholder = Nothing
+                , label =
+                    Input.labelAbove
+                        [ Font.color (Element.rgba255 24 164 251 1) ]
+                        (Element.text "vout")
+                }
+            , Input.text
+                [ Border.shadow
+                    { offset = ( 0, 2 )
+                    , size = 0
+                    , blur = 5
+                    , color = Element.rgba255 24 195 251 1
+                    }
+                , Background.color (Element.rgba255 240 251 255 1)
+                , Element.centerX
+                , Font.family [ Font.typeface "Rubik" ]
+                , Font.size 24
+                , Element.spacingXY 0 10
+                , Element.height Element.shrink
+                , Element.width (Element.shrink |> Element.maximum 250)
+                , Element.paddingEach
+                    { top = 16, right = 8, bottom = 8, left = 8 }
+                , Border.rounded 2
+                , Border.color (Element.rgba255 24 195 251 1)
+                , Border.dashed
+                , Border.widthXY 1 1
+                ]
+                { onChange = ChangedNewTransactionFormInputTxId
+                , text = model.newTransactionForm.input.txId
+                , placeholder = Nothing
+                , label =
+                    Input.labelAbove
+                        [ Font.color (Element.rgba255 24 164 251 1) ]
+                        (Element.text "txId")
+                }
+            ]
+        , Element.row
+            [ Element.spacingXY 12 0
+            , Element.height Element.shrink
+            , Element.width Element.fill
+            ]
+            [ Input.text
+                [ Border.shadow
+                    { offset = ( 0, 2 )
+                    , size = 0
+                    , blur = 5
+                    , color = Element.rgba255 24 195 251 1
+                    }
+                , Background.color (Element.rgba255 240 251 255 1)
+                , Element.centerX
+                , Font.family [ Font.typeface "Rubik" ]
+                , Font.size 24
+                , Element.spacingXY 0 10
+                , Element.height Element.shrink
+                , Element.width (Element.shrink |> Element.maximum 150)
+                , Element.paddingEach
+                    { top = 16, right = 8, bottom = 8, left = 8 }
+                , Border.rounded 2
+                , Border.color (Element.rgba255 24 195 251 1)
+                , Border.dashed
+                , Border.widthXY 1 1
+                ]
+                { onChange = ChangedNewTransactionFormOutputAmount
+                , text = model.newTransactionForm.output.amount
+                , placeholder = Nothing
+                , label =
+                    Input.labelAbove
+                        [ Font.color (Element.rgba255 24 164 251 1) ]
+                        (Element.text "amount")
+                }
+            ]
+        , Element.row
+            [ Element.spacingXY 12 0
+            , Element.height Element.shrink
+            , Element.width Element.fill
+            ]
+            [ Input.text
+                [ Border.shadow
+                    { offset = ( 0, 2 )
+                    , size = 0
+                    , blur = 5
+                    , color = Element.rgba255 24 195 251 1
+                    }
+                , Background.color (Element.rgba255 240 251 255 1)
+                , Element.centerX
+                , Font.family [ Font.typeface "Rubik" ]
+                , Font.size 24
+                , Element.spacingXY 0 10
+                , Element.height Element.shrink
+                , Element.width (Element.shrink |> Element.maximum 250)
+                , Element.paddingEach
+                    { top = 16, right = 8, bottom = 8, left = 8 }
+                , Border.rounded 2
+                , Border.color (Element.rgba255 24 195 251 1)
+                , Border.dashed
+                , Border.widthXY 1 1
+                ]
+                { onChange = ChangedNewTransactionFormOutputAddress
+                , text = model.newTransactionForm.output.address
+                , placeholder = Nothing
+                , label =
+                    Input.labelAbove
+                        [ Font.color (Element.rgba255 24 164 251 1) ]
+                        (Element.text "pay to address")
+                }
+            ]
+        , Element.row
+            [ Element.spacingXY 12 0
+            , Element.height Element.shrink
+            , Element.width Element.fill
+            ]
+            [ Input.button
+                [ Border.shadow
+                    { offset = ( 0, 2 )
+                    , size = 0
+                    , blur = 15
+                    , color = Element.rgba255 24 164 251 1
+                    }
+                , Background.color (Element.rgba255 24 164 251 1)
+                , Element.centerY
+                , Element.centerX
+                , Font.center
+                , Font.color (Element.rgba255 255 255 255 1)
+                , Element.height Element.shrink
+                , Element.width Element.shrink
+                , Element.paddingXY 16 8
+                , Border.rounded 2
+                , Border.color (Element.rgba255 24 164 251 1)
+                , Border.solid
+                , Border.widthXY 1 1
+                ]
+                { onPress = Just PressedNewTransactionFormCreateTransaction
+                , label = Element.text "Create Transaction"
+                }
+            ]
+        ]
+
+
+
 -- contentCard model caption =
 --     column [ width fill ]
 --         [ el [ paddingXY 12 5 ] <|
@@ -602,6 +1056,38 @@ newVaultCard model =
 --         , column [ width fill, spacingXY 5 5, paddingXY 12 0 ] <|
 --             cardItem model.selectedTx model.transactions
 --         ]
+
+
+cardItem selectedTx items =
+    List.map
+        (\item ->
+            if selectedTx == item.id then
+                row
+                    [ spacing 50, height (px 100), width fill, Background.color (rgb 255 255 255), pointer, mouseOver [ Background.color (rgb 0 200 200) ] ]
+                    [ el [] (text (String.fromInt item.id))
+                    , el [] (text item.direction)
+                    , el [] (text item.time)
+                    , el [] (text (String.fromInt item.amount))
+                    ]
+
+            else
+                row
+                    [ spacing 50
+                    , width fill
+                    , Background.color (rgb 255 0 255)
+                    , pointer
+                    , mouseOver [ Background.color (rgb 0 200 200) ]
+                    ]
+                    [ el [] (text (String.fromInt item.id))
+                    , el [] (text item.direction)
+                    , el [] (text item.time)
+                    , el [] (text (String.fromInt item.amount))
+                    ]
+        )
+        items
+
+
+
 ---- PROGRAM ----
 
 

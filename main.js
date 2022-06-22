@@ -2,8 +2,11 @@
 // import Dash from "dash";
 import {
   createClientOpts,
-  initIdentity,
+  getCachedIdentity,
   submitVaultDocument,
+  getCachedWalletAccount,
+  createTransactionDoc,
+  submitTransactionDocument,
 } from "./lib/index.js";
 // @ts-ignore
 import { Elm } from "./src/Main.elm";
@@ -15,6 +18,11 @@ const app = Elm.Main.init({ node: root });
 // Init Dash SDK
 const dashcore = Dash.Core;
 const client = new Dash.Client(createClientOpts());
+// Init Wallet Account so it's available
+(async function () {
+  client._account = await getCachedWalletAccount(client);
+  client._identity = await getCachedIdentity(client, client._account);
+})();
 
 // Init Data
 fetchVaults();
@@ -37,16 +45,45 @@ fetchVaults();
 /** @type {PublicKeys|{}} */
 const PublicKeys = {};
 
-app.ports.createVault.subscribe(function ({ threshold, identityIds }) {
+app.ports.createTransaction.subscribe(async function ({
+  vault,
+  transactionArgs,
+}) {
+  const account = await getCachedWalletAccount(client);
+  const identity = await getCachedIdentity(client, account);
+
+  console.log("vault :>> ", vault);
+  console.log("PublicKeys :>> ", PublicKeys);
+  console.log("transactionArgs :>> ", transactionArgs);
+
+  const transactionDoc = createTransactionDoc({ vault, transactionArgs });
+  const result = await submitTransactionDocument(
+    client,
+    identity,
+    transactionDoc
+  );
+  console.log("result :>> ", result);
+});
+
+app.ports.createVault.subscribe(async function ({ threshold, identityIds }) {
   console.log("threshold :>> ", threshold);
   console.log("identityIds :>> ", identityIds);
   if (
     threshold > 0 &&
     threshold <= identityIds.length &&
     identityIds.length > 0
-  )
-    createVaultFromIdentities({ threshold, identityIds });
-  else console.error("Bad Args");
+  ) {
+    const result = await createVaultFromIdentities({
+      threshold,
+      identityIds,
+    });
+
+    const vaultId = result.transitions[0].$id;
+    app.ports.getCreatedVaultId.send(vaultId);
+
+    // Refresh vaults list
+    fetchVaults();
+  } else console.error("Bad Args");
 });
 
 app.ports.searchDashNames.subscribe(async function (searchDashName) {
@@ -90,9 +127,15 @@ async function fetchPublicKeyForDashName({ identityId, name }) {
 }
 
 async function fetchVaults() {
+  const account = await client.getWalletAccount();
+  const identityId = await account.identities.getIdentityIds()[0];
+  console.log("identityId :>> ", identityId);
+
   const vaults = (
     await client.platform.documents.get("honeypot.vault", {
       limit: 10,
+      where: [["$createdAt", ">", 0]],
+      orderBy: [["$createdAt", "desc"]],
     })
   ).map((vault) => vault.toJSON());
   console.log("vault :>> ", vaults);
@@ -104,6 +147,7 @@ async function fetchVaults() {
     ).toString();
     console.log("Vault MultiSig Address: ", vaultAddress);
     return {
+      id: vault.$id,
       threshold: vault.threshold,
       identityIds: vault.identityIds,
       publicKeys: vault.publicKeys,
@@ -119,7 +163,7 @@ const createVaultFromIdentities = async ({ threshold, identityIds }) => {
   const account = await client.getWalletAccount();
   const address = account.getUnusedAddress();
   console.log("Unused address:", address.address);
-  const identity = await initIdentity(client, account);
+  const identity = await getCachedIdentity(client, account);
   const signerIdentities = await Promise.all(
     identityIds.map((identityId) => client.platform.identities.get(identityId))
   );
@@ -136,7 +180,8 @@ const createVaultFromIdentities = async ({ threshold, identityIds }) => {
     publicKeys,
   });
 
-  console.log("vaultDocument :>> ", vaultDocument.toJSON());
+  return vaultDocument.toJSON();
+  // TODO send vaultDocument.toJSON().transitions[0].$id back to elm to display txs for this vault
 };
 
 // Handle wallet async errors

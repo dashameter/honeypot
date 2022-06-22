@@ -1,6 +1,6 @@
 import Dash from "dash";
 import fs from "fs";
-import { createClientOpts, initIdentity } from "../lib/index.js";
+import { createClientOpts, getCachedIdentity } from "../lib/index.js";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -9,9 +9,9 @@ const client = new Dash.Client(createClientOpts(process.env.VITE_MNEMONIC1));
 const registerContract = async () => {
   const { platform } = client;
   const account = await client.getWalletAccount();
-  const identity = await initIdentity(client, account);
+  const identity = await getCachedIdentity(client, account);
 
-  // console.log("identity :>> ", identity);
+  console.log("identityId :>> ", identity.getId().toString());
 
   const contractDocuments = {
     vault: {
@@ -20,6 +20,11 @@ const registerContract = async () => {
         {
           name: "ownerId",
           properties: [{ $ownerId: "asc" }],
+          unique: false,
+        },
+        {
+          name: "createdAt",
+          properties: [{ $createdAt: "desc" }],
           unique: false,
         },
       ],
@@ -38,6 +43,7 @@ const registerContract = async () => {
           },
         },
       },
+      required: ["$createdAt"],
       additionalProperties: false,
     },
     transaction: {
