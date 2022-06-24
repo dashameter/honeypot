@@ -54,9 +54,14 @@ const registerContract = async () => {
           properties: [{ $ownerId: "asc" }],
           unique: false,
         },
+        {
+          name: "vaultIdCreatedAt",
+          properties: [{ vaultId: "desc" }, { $createdAt: "desc" }],
+          unique: false,
+        },
       ],
       properties: {
-        vaultId: { type: "string" },
+        vaultId: { type: "string", maxLength: 63 },
         utxo: {
           type: "object",
           properties: {
@@ -77,6 +82,7 @@ const registerContract = async () => {
           additionalProperties: false,
         },
       },
+      required: ["vaultId", "$createdAt"],
       additionalProperties: false,
     },
 
@@ -89,8 +95,8 @@ const registerContract = async () => {
           unique: false,
         },
         {
-          name: "transactionId",
-          properties: [{ transactionId: "asc" }],
+          name: "transactionIdCreatedAt",
+          properties: [{ transactionId: "asc" }, { $createdAt: "desc" }],
           unique: false,
         },
       ],
@@ -121,6 +127,7 @@ const registerContract = async () => {
           additionalProperties: false,
         },
       },
+      required: ["transactionId", "$createdAt"],
       additionalProperties: false,
     },
   };
