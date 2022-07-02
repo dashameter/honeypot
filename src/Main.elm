@@ -11,9 +11,10 @@ import Element.Region as Region
 import Helpers exposing (..)
 import Html exposing (Html)
 import Http
-import Json.Decode exposing (Decoder, decodeValue, field, int, list, string, succeed)
+import Json.Decode exposing (Decoder, decodeValue, field, float, int, list, string, succeed)
 import Json.Decode.Pipeline exposing (optional, required, requiredAt)
 import Platform.Cmd exposing (Cmd)
+import TimeFormat exposing (prettyTime)
 import TransactionList exposing (transactionListView)
 
 
@@ -32,7 +33,8 @@ port createVault : CreateVaultArgs -> Cmd msg
 
 type alias CreateTransactionArgs =
     { vault : Vault
-    , transactionArgs : TransactionForm
+    , utxos : List UTXO
+    , output : Output
     }
 
 
@@ -137,6 +139,7 @@ type alias UTXO =
     , satoshis : Int
     , height : Int
     , confirmations : Int
+    , ts : Int
     }
 
 
@@ -148,8 +151,9 @@ utxoDecoder =
         |> required "vout" int
         |> required "scriptPubKey" string
         |> required "satoshis" int
-        |> required "height" int
+        |> optional "height" int 0
         |> required "confirmations" int
+        |> optional "ts" int 0
 
 
 transactionListDecoder : Decoder TransactionListItem
@@ -209,7 +213,9 @@ type alias Model =
     , newTransactionForm : TransactionForm
     , transactionList : List TransactionListItem
     , signatures : List Signature
-    , utxoStatus : UTXOStatus
+    , utxoStatus : Status (List UTXO)
+    , txHistory : List TxHistoryItem
+    , txHistoryStatus : Status (List TxHistoryItem)
     }
 
 
@@ -224,12 +230,7 @@ initialModel =
     , dashNameResults = []
     , selectedVaultId = Nothing
     , newTransactionForm =
-        { input =
-            { txId = "556069a9991f618faf18a1d2853dd96aefaa25a2676cefdb625fa15e64ff1a50"
-            , outputIndex = "0"
-            , satoshis = "1000000"
-            }
-        , output =
+        { output =
             { address = "yWmaDGGSz1hFxXkVUR6n69E3FqfpQ5qgQn"
             , amount = "100000"
             }
@@ -237,6 +238,8 @@ initialModel =
     , transactionList = []
     , signatures = []
     , utxoStatus = Loading
+    , txHistory = []
+    , txHistoryStatus = Loading
     }
 
 
@@ -254,15 +257,8 @@ type alias Output =
 
 
 type alias TransactionForm =
-    { input : Input
-    , output : Output
+    { output : Output
     }
-
-
-type UTXOStatus
-    = Loading
-    | Loaded (List UTXO) String
-    | Errored String
 
 
 
@@ -291,15 +287,13 @@ type Msg
     | CreateVaultPressed
     | SearchDashNameChanged String
     | PressedAddAnotherVault
-    | ChangedNewTransactionFormInputOutputIndex String
-    | ChangedNewTransactionFormInputSatoshis String
-    | ChangedNewTransactionFormInputTxId String
     | ChangedNewTransactionFormOutputAmount String
     | PressedNewTransactionFormCreateTransaction
     | ChangedNewTransactionFormOutputAddress String
     | PressedSignTransaction String
     | PressedExecuteTransaction String
     | GotUtxos (Result Http.Error (List UTXO))
+    | GotTxHistory (Result Http.Error (List TxHistoryItem))
 
 
 digitsOnly : String -> String
@@ -310,16 +304,17 @@ digitsOnly =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        GotUtxos (Ok utxos) ->
-            case utxos of
-                first :: rest ->
-                    ( { model | utxoStatus = Loaded utxos first.txid }, Cmd.none )
+        GotTxHistory (Ok txs) ->
+            ( { model | txHistoryStatus = Loaded (List.sortWith descendingTxHistoryTime txs) }, Cmd.none )
 
-                [] ->
-                    ( { model | utxoStatus = Errored "0 utxos found" }, Cmd.none )
+        GotTxHistory (Err httpError) ->
+            ( { model | txHistoryStatus = Errored "Insight API Error!" }, Cmd.none )
+
+        GotUtxos (Ok utxos) ->
+            ( { model | utxoStatus = Loaded (List.sortWith descendingUtxo utxos) }, Cmd.none )
 
         GotUtxos (Err httpError) ->
-            ( { model | utxoStatus = Errored "Inisght API Error!" }, Cmd.none )
+            ( { model | utxoStatus = Errored "Insight API Error!" }, Cmd.none )
 
         PressedExecuteTransaction transactionId ->
             let
@@ -355,10 +350,52 @@ update msg model =
 
         PressedNewTransactionFormCreateTransaction ->
             let
+                selectEnoughUtxos : Int -> List UTXO -> Int -> List UTXO -> List UTXO
+                selectEnoughUtxos startAmount startUtxos accAmount accUtxos =
+                    if accAmount <= startAmount then
+                        let
+                            nextUtxo =
+                                Maybe.withDefault
+                                    { address = ""
+                                    , txid = ""
+                                    , vout = 0
+                                    , scriptPubKey = ""
+                                    , satoshis = 0
+                                    , height = 0
+                                    , confirmations = 0
+                                    , ts = 0
+                                    }
+                                    (List.head
+                                        startUtxos
+                                    )
+
+                            newAccumulator =
+                                accAmount + nextUtxo.satoshis
+
+                            newUtxos =
+                                accUtxos ++ List.take 1 startUtxos
+                        in
+                        selectEnoughUtxos startAmount
+                            (List.drop 1 startUtxos)
+                            newAccumulator
+                            newUtxos
+
+                    else
+                        accUtxos
+
+                selectedUtxos =
+                    case model.utxoStatus of
+                        Loaded utxos ->
+                            selectEnoughUtxos (Maybe.withDefault 0 (String.toInt model.newTransactionForm.output.amount)) utxos 0 []
+
+                        _ ->
+                            Debug.todo "todo"
+
                 cmd =
                     createTransaction
                         { vault = selectedVault model
-                        , transactionArgs = model.newTransactionForm
+                        , utxos = selectedUtxos
+                        , output = model.newTransactionForm.output
                         }
             in
             ( model
@@ -378,66 +415,6 @@ update msg model =
 
                 newTransactionForm =
                     { oldNewTransactionForm | output = output }
-            in
-            ( { model
-                | newTransactionForm = newTransactionForm
-              }
-            , Cmd.none
-            )
-
-        ChangedNewTransactionFormInputSatoshis satoshis ->
-            let
-                oldNewTransactionForm =
-                    model.newTransactionForm
-
-                oldInput =
-                    oldNewTransactionForm.input
-
-                input =
-                    { oldInput | satoshis = digitsOnly satoshis }
-
-                newTransactionForm =
-                    { oldNewTransactionForm | input = input }
-            in
-            ( { model
-                | newTransactionForm = newTransactionForm
-              }
-            , Cmd.none
-            )
-
-        ChangedNewTransactionFormInputOutputIndex outputIndex ->
-            let
-                oldNewTransactionForm =
-                    model.newTransactionForm
-
-                oldInput =
-                    oldNewTransactionForm.input
-
-                input =
-                    { oldInput | outputIndex = digitsOnly outputIndex }
-
-                newTransactionForm =
-                    { oldNewTransactionForm | input = input }
-            in
-            ( { model
-                | newTransactionForm = newTransactionForm
-              }
-            , Cmd.none
-            )
-
-        ChangedNewTransactionFormInputTxId txId ->
-            let
-                oldNewTransactionForm =
-                    model.newTransactionForm
-
-                oldInput =
-                    oldNewTransactionForm.input
-
-                input =
-                    { oldInput | txId = txId }
-
-                newTransactionForm =
-                    { oldNewTransactionForm | input = input }
             in
             ( { model
                 | newTransactionForm = newTransactionForm
@@ -527,18 +504,21 @@ update msg model =
                         { vaultId = vaultId
                         }
 
+                newModel =
+                    { model | selectedVaultId = Just vaultId, signatures = [] }
+
                 vault =
-                    selectedVault model
+                    Debug.log "selectedVault" (selectedVault newModel)
 
                 cmdFetchUtxos =
                     Http.get
                         -- TODO "enable dynamic vault address once dashcore-lib produces testnet addresses"
                         -- { url = Debug.log "url " "https://testnet-insight.dashevo.org/insight-api/addr/" ++ vault.vaultAddress ++ "/utxo"
-                        { url = Debug.log "url " "https://testnet-insight.dashevo.org/insight-api/addr/91DzvuNvNgP2p5KenQNYBSyivDL848fhzG/utxo"
+                        { url = Debug.log "url " "https://testnet-insight.dashevo.org/insight-api/addr/" ++ vault.vaultAddress ++ "/utxo"
                         , expect = Http.expectJson GotUtxos (list utxoDecoder)
                         }
             in
-            ( { model | selectedVaultId = Just vaultId, signatures = [] }, Cmd.batch [ cmdFetchTransactions, cmdFetchUtxos ] )
+            ( newModel, Cmd.batch [ cmdFetchTransactions, cmdFetchUtxos, cmdFetchTxs vault.vaultAddress ] )
 
 
 
@@ -967,111 +947,31 @@ transactionCards model =
                 ]
                 { onPress = Just PressedAddAnotherVault, label = Element.text "Add Another Vault" }
             )
-        , newTransactionFormCard model
+        , vaultDashboard model
+        , newTransactionFormView model
         , transactionListView model (selectedVault model) ( PressedSignTransaction, PressedExecuteTransaction )
+        , transactionHistoryListView model
         ]
 
 
-selectedVault : Model -> Vault
-selectedVault model =
-    Maybe.withDefault
-        { id = ""
-        , identityIds = []
-        , publicKeys = []
-        , threshold = 0
-        , vaultAddress = ""
-        }
-    <|
-        List.head <|
-            List.filter (\vault -> vault.id == Maybe.withDefault "" model.selectedVaultId) model.vaults
-
-
-newTransactionFormCard model =
-    Element.column
-        [ Font.color (Element.rgba255 46 52 54 1)
-        , Font.family [ Font.typeface "Rubik" ]
-        , Font.size 16
-        , Element.spacingXY 0 12
-        , centerX
-        , Border.rounded 2
-        , Border.color (Element.rgba255 24 195 251 1)
-        , Border.dashed
-        , Border.widthXY 1 1
-        , paddingXY 12 12
+newTransactionFormView model =
+    column
+        [ centerX
+        , width (px 750)
+        , spacing 20
+        , paddingXY 0 20
         ]
-        [ el
-            [ Font.color (Element.rgba255 0 103 138 1)
-            , Font.size 24
-            , Element.height Element.shrink
-            , Element.width Element.shrink
+        [ row
+            [ Font.size 24
+            , Font.color (Element.rgba255 0 103 138 1)
+            , width fill
             ]
-            (Element.text <|
-                "Threshold: "
-                    ++ String.fromInt (selectedVault model).threshold
-                    ++ "/"
-                    ++ String.fromInt
-                        (List.length
-                            (selectedVault model).identityIds
-                        )
-            )
-        , el
-            [ Font.color (Element.rgba255 0 103 138 1)
-            , Font.size 24
-            , Element.height Element.shrink
-            , Element.width Element.shrink
-            ]
-            (Element.text <|
-                "VaultAddress: "
-                    ++ (selectedVault model).vaultAddress
-            )
-        , el
-            [ Font.color (Element.rgba255 0 103 138 1)
-            , Font.size 24
-            , Element.height Element.shrink
-            , Element.width Element.shrink
-            ]
-            (text
-                ("Balance: "
-                    ++ (case model.utxoStatus of
-                            Loaded utxos _ ->
-                                duffsToDashString (List.foldl (+) 0 (List.map (\t -> t.satoshis) utxos)) ++ " Dash"
-
-                            Loading ->
-                                "Loading UTXOs.."
-
-                            Errored errorMessage ->
-                                "Error: " ++ errorMessage
-                       )
-                )
-            )
-        , el
-            [ Font.color (Element.rgba255 0 103 138 1)
-            , Font.size 18
-            , Element.height Element.shrink
-            , Element.width Element.shrink
-            ]
-            (Element.text <|
-                "UTXOs:"
-            )
-        , Element.column
-            [ Element.spacingXY 12 0
-            , Element.height Element.shrink
-            , Element.width Element.fill
-            ]
-          <|
-            case model.utxoStatus of
-                Loaded utxos _ ->
-                    List.map (\utxo -> row [] [ textColumn [] [ text (duffsToDashString utxo.satoshis ++ ", Dash "), text ("vout: " ++ String.fromInt utxo.vout), text ("txId: " ++ utxo.txid) ] ]) utxos
-
-                Loading ->
-                    [ text "Loading UTXOs.." ]
-
-                Errored errorMessage ->
-                    [ text ("Error: " ++ errorMessage) ]
+            [ text "Create Transaction" ]
         , Element.row
             [ Element.spacingXY 12 0
             , Element.height Element.shrink
             , Element.width Element.fill
+            , spacingXY 40 0
             ]
             [ Input.text
                 [ Border.shadow
@@ -1115,7 +1015,7 @@ newTransactionFormCard model =
                 , Font.size 24
                 , Element.spacingXY 0 10
                 , Element.height Element.shrink
-                , Element.width (px 500)
+                , Element.width (px 540)
                 , Element.paddingEach
                     { top = 16, right = 8, bottom = 8, left = 8 }
                 , Border.rounded 2
@@ -1162,6 +1062,135 @@ newTransactionFormCard model =
                 , label = Element.text "Create Transaction"
                 }
             ]
+        ]
+
+
+
+-- (List.map
+--     (\transaction ->
+--         row
+--             [ height shrink
+--             , width fill
+--             , paddingXY 8 8
+--             , Border.rounded 2
+--             , Border.color (rgba255 24 195 251 1)
+--             , Border.dashed
+--             , Border.widthXY 1 1
+--             ]
+--             [ column
+--                 [ height shrink
+--                 , width fill
+--                 ]
+--                 [ paragraph
+--                     [ spacingXY 0 4
+--                     , height shrink
+--                     , width fill
+--                     ]
+--                     [ text (String.slice 0 4 transaction.txid) ]
+--                 ]
+--             ]
+--     )
+--     model.txHistory
+-- )
+
+
+selectedVault : Model -> Vault
+selectedVault model =
+    Maybe.withDefault
+        { id = ""
+        , identityIds = []
+        , publicKeys = []
+        , threshold = 0
+        , vaultAddress = ""
+        }
+    <|
+        List.head <|
+            List.filter (\vault -> vault.id == Maybe.withDefault "" model.selectedVaultId) model.vaults
+
+
+vaultDashboard model =
+    Element.column
+        [ Font.color (Element.rgba255 46 52 54 1)
+        , Font.family [ Font.typeface "Rubik" ]
+        , Font.size 16
+        , Element.spacingXY 0 12
+        , centerX
+        , Border.rounded 2
+        , Border.color (Element.rgba255 24 195 251 1)
+        , Border.dashed
+        , Border.widthXY 1 1
+        , paddingXY 12 12
+        , width (px 750)
+        ]
+        [ el
+            [ Font.color (Element.rgba255 0 103 138 1)
+            , Font.size 24
+            , Element.height Element.shrink
+            , Element.width Element.shrink
+            ]
+            (Element.text <|
+                "Threshold: "
+                    ++ String.fromInt (selectedVault model).threshold
+                    ++ "/"
+                    ++ String.fromInt
+                        (List.length
+                            (selectedVault model).identityIds
+                        )
+            )
+        , el
+            [ Font.color (Element.rgba255 0 103 138 1)
+            , Font.size 24
+            , Element.height Element.shrink
+            , Element.width Element.shrink
+            ]
+            (Element.text <|
+                "VaultAddress: "
+                    ++ (selectedVault model).vaultAddress
+            )
+        , el
+            [ Font.color (Element.rgba255 0 103 138 1)
+            , Font.size 24
+            , Element.height Element.shrink
+            , Element.width Element.shrink
+            ]
+            (text
+                ("Balance: "
+                    ++ (case model.utxoStatus of
+                            Loaded utxos ->
+                                duffsToDashString (List.foldl (+) 0 (List.map (\t -> t.satoshis) utxos)) ++ " Dash"
+
+                            Loading ->
+                                "Loading UTXOs.."
+
+                            Errored errorMessage ->
+                                "Error: " ++ errorMessage
+                       )
+                )
+            )
+        , el
+            [ Font.color (Element.rgba255 0 103 138 1)
+            , Font.size 18
+            , Element.height Element.shrink
+            , Element.width Element.shrink
+            ]
+            (Element.text <|
+                "UTXOs:"
+            )
+        , Element.column
+            [ Element.spacingXY 12 0
+            , Element.height Element.shrink
+            , Element.width Element.fill
+            ]
+          <|
+            case model.utxoStatus of
+                Loaded utxos ->
+                    List.map (\utxo -> row [] [ textColumn [] [ text (duffsToDashString utxo.satoshis ++ ", Dash "), text ("vout: " ++ String.fromInt utxo.vout), text ("txId: " ++ utxo.txid) ] ]) utxos
+
+                Loading ->
+                    [ text "Loading UTXOs.." ]
+
+                Errored errorMessage ->
+                    [ text ("Error: " ++ errorMessage) ]
         ]
 
 
@@ -1220,4 +1249,222 @@ main =
         , init = \_ -> init
         , update = update
         , subscriptions = subscriptions
+        }
+
+
+type Status a
+    = Loading
+    | Loaded a
+    | Errored String
+
+
+apiurl : String -> String
+apiurl address =
+    "https://testnet-insight.dashevo.org/insight-api/addrs/" ++ address ++ "/txs?from=0&to=50"
+
+
+explorerurl =
+    "https://testnet-insight.dashevo.org/insight/tx/"
+
+
+type TxHistoryType
+    = Received
+    | Sent
+
+
+type alias TxHistoryItem =
+    { txid : String
+    , valueIn : Float
+    , valueOut : Float
+    , time : Int
+    , txType : TxHistoryType
+    , amount : Float
+    , vout : List Vout
+    , vin : List Vin
+    , toAddress : String
+    , fromAddress : String
+    }
+
+
+transactionHistoryListView model =
+    column
+        [ spacingXY 0 8
+        , centerX
+        , height shrink
+        , width (px 750)
+
+        -- , Border.rounded 2
+        -- , Border.color (Element.rgba255 24 195 251 1)
+        -- , Border.dashed
+        -- , Border.width 1
+        , paddingXY 0 12
+        , spacingXY 0 20
+        ]
+        (row
+            [ Font.size 24
+            , Font.color (Element.rgba255 0 103 138 1)
+            , width fill
+            ]
+            [ text "Transaction History" ]
+            :: (case model.txHistoryStatus of
+                    Loaded txs ->
+                        List.map
+                            (\tx ->
+                                newTabLink
+                                    [ width fill
+                                    ]
+                                    { url = explorerurl ++ tx.txid
+                                    , label =
+                                        row
+                                            [ Background.color (Element.rgba255 221 246 248 1)
+                                            , Font.size 16
+                                            , Font.color (Element.rgba255 0 103 138 1)
+                                            , Border.shadow
+                                                { offset = ( 0, 5 )
+                                                , size = 0
+                                                , blur = 15
+                                                , color = Element.rgba255 23 126 161 1
+                                                }
+                                            , spacingXY 12 12
+                                            , width fill
+                                            , Border.rounded 8
+                                            , Border.color (Element.rgba255 23 126 161 1)
+                                            , pointer
+                                            , mouseOver [ Border.color (Element.rgba255 223 226 161 1) ]
+                                            , Border.solid
+                                            , Border.widthXY 4 4
+                                            , paddingXY 12 12
+                                            ]
+                                            [ column []
+                                                [ case tx.txType of
+                                                    Received ->
+                                                        text ("Received " ++ String.fromFloat tx.amount ++ " Dash from " ++ tx.fromAddress)
+
+                                                    Sent ->
+                                                        text ("Sent " ++ String.fromFloat tx.amount ++ " Dash to " ++ tx.toAddress)
+                                                ]
+                                            , column [] [ text (prettyTime tx.time) ]
+                                            ]
+                                    }
+                            )
+                            txs
+
+                    Loading ->
+                        [ text "Loading Transactions.." ]
+
+                    Errored errorMessage ->
+                        [ text ("Error: " ++ errorMessage) ]
+               )
+        )
+
+
+buildTxHistoryItem : String -> String -> Float -> Float -> Int -> List Vout -> List Vin -> TxHistoryItem
+buildTxHistoryItem vaultAddress txid valueIn valueOut timeSecs vout vin =
+    let
+        -- TODO handle more complex transactions with multiple vins / vouts
+        fromUtxo =
+            Maybe.withDefault { address = "", value = 0 } (List.head vin)
+
+        fromAddress =
+            fromUtxo.address
+
+        toUtxo =
+            Maybe.withDefault { addresses = [ "" ], value = 0 } (List.head vout)
+
+        toAddress =
+            Maybe.withDefault "" (List.head toUtxo.addresses)
+
+        amount =
+            toUtxo.value
+
+        txType =
+            if fromUtxo.address == vaultAddress then
+                Sent
+
+            else
+                Received
+
+        time =
+            timeSecs * 1000
+    in
+    { txid = txid
+    , valueIn = valueIn
+    , valueOut = valueOut
+    , time = time
+    , amount = amount
+    , txType = txType
+    , vout = vout
+    , vin = vin
+    , toAddress = toAddress
+    , fromAddress = fromAddress
+    }
+
+
+
+-- type Msg
+-- = GotTxHistory (Result Http.Error (List TxHistoryItem))
+
+
+type alias Vin =
+    { address : String
+    , value : Float
+    }
+
+
+buildVout : String -> List String -> Vout
+buildVout stvalue addresses =
+    let
+        value =
+            Maybe.withDefault 0 (String.toFloat stvalue)
+    in
+    { value = value, addresses = addresses }
+
+
+type alias Vout =
+    { value : Float
+    , addresses : List String
+    }
+
+
+
+-- buildVout: String -> List String -> Vout
+
+
+txHistoryVoutDecoder =
+    succeed buildVout
+        |> required "value" string
+        |> requiredAt [ "scriptPubKey", "addresses" ] (list string)
+
+
+txHistoryVinDecoder =
+    succeed Vin
+        |> required "addr" string
+        |> required "value" float
+
+
+
+-- listTxHistoryVoutDecode =
+--     succeed Vout
+--         |> required "vout" (list txHistoryVoutDecoder)
+
+
+txHistoryDecoder : String -> Decoder TxHistoryItem
+txHistoryDecoder vaultAddress =
+    succeed (buildTxHistoryItem vaultAddress)
+        |> required "txid" string
+        |> required "valueIn" float
+        |> required "valueOut" float
+        |> required "time" int
+        |> required "vout" (list txHistoryVoutDecoder)
+        |> required "vin" (list txHistoryVinDecoder)
+
+
+cmdFetchTxs : String -> Cmd Msg
+cmdFetchTxs vaultAddress =
+    Http.get
+        -- TODO "enable dynamic vault address once dashcore-lib produces testnet addresses"
+        -- TODO "enable pagination"
+        -- TODO "enable local/testnet/mainnet"
+        { url = Debug.log "url " (apiurl vaultAddress)
+        , expect = Http.expectJson GotTxHistory (field "items" (list (txHistoryDecoder vaultAddress)))
         }

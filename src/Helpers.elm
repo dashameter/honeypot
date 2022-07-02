@@ -19,3 +19,27 @@ duffsToDashString duffs =
 dashToDuffs : Float -> Int
 dashToDuffs dash =
     floor (dash * dashDecimals)
+
+
+descendingUtxo a b =
+    case compare a.satoshis b.satoshis of
+        LT ->
+            GT
+
+        GT ->
+            LT
+
+        EQ ->
+            EQ
+
+
+descendingTxHistoryTime a b =
+    case compare a.time b.time of
+        LT ->
+            GT
+
+        GT ->
+            LT
+
+        EQ ->
+            EQ

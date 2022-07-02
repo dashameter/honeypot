@@ -21,6 +21,7 @@
     "vite-plugin-elm": "^2.6.1"
   },
   "dependencies": {
+    "axios": "^0.27.2",
     "dash": "^3.22.12",
     "dotenv": "^16.0.1"
   }

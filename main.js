@@ -14,6 +14,7 @@ import {
 } from "./lib/index.js";
 // @ts-ignore
 import { Elm } from "./src/Main.elm";
+import axios from "axios";
 
 // Init Elm App
 const root = document.querySelector("#app div");
@@ -76,11 +77,12 @@ app.ports.executeTransaction.subscribe(async function ({ transactionId }) {
 
   const vaultAddress = new dashcore.Address(
     vaultDoc.publicKeys,
-    vaultDoc.threshold
+    vaultDoc.threshold,
+    "testnet"
   );
 
   const multiSigTx = new dashcore.Transaction()
-    .from(transactionDoc.utxo, vaultDoc.publicKeys, vaultDoc.threshold)
+    .from(transactionDoc.utxos, vaultDoc.publicKeys, vaultDoc.threshold)
     .to(transactionDoc.output.address, transactionDoc.output.amount)
     .change(vaultAddress);
 
@@ -101,8 +103,24 @@ app.ports.executeTransaction.subscribe(async function ({ transactionId }) {
   console.log("multiSigTx", multiSigTx.toString());
   console.log("multiSigTx :>> ", multiSigTx);
 
-  const txId = await account.broadcastTransaction(multiSigTx);
-  console.log("txId :>> ", txId);
+  axios
+    .post(
+      "https://testnet-insight.dashevo.org/insight-api/tx/send",
+      {
+        rawtx: multiSigTx.toString(),
+      }
+      //  {headers: {"Content-Type": "text/plain"}}
+    )
+    .then(function (response) {
+      console.log(response.data);
+    })
+    .catch(function (error) {
+      console.log(error.response.data);
+    });
+
+  // TODO use account.broadcastTransaction once utxo bug in SDK is fixed
+  // const txId = await account.broadcastTransaction(multiSigTx);
+  // console.log("txId :>> ", txId);
 });
 
 app.ports.signTransaction.subscribe(async function ({ transactionId }) {
@@ -144,16 +162,17 @@ async function updateSignatures({ transactionIds }) {
 }
 app.ports.createTransaction.subscribe(async function ({
   vault,
-  transactionArgs,
+  utxos,
+  output,
 }) {
   const account = await getCachedWalletAccount(client);
   const identity = await getCachedIdentity(client, account);
 
   console.log("vault :>> ", vault);
-  console.log("PublicKeys :>> ", PublicKeys);
-  console.log("transactionArgs :>> ", transactionArgs);
+  console.log("utxos :>> ", utxos);
+  console.log("output :>> ", output);
 
-  const transactionDoc = createTransactionDoc({ vault, transactionArgs });
+  const transactionDoc = createTransactionDoc({ vault, utxos, output });
   const result = await submitTransactionDocument(
     client,
     identity,
@@ -269,7 +288,8 @@ async function fetchVaults() {
   const vaultResponse = vaults.map((vault) => {
     const vaultAddress = new dashcore.Address(
       vault.publicKeys,
-      vault.threshold
+      vault.threshold,
+      "testnet"
     ).toString();
     console.log("Vault MultiSig Address: ", vaultAddress);
     return {
@@ -298,7 +318,7 @@ const createVaultFromIdentities = async ({ threshold, identityIds }) => {
     return identity.publicKeys[0].data.toString("hex");
   });
   console.log("publicKeys :>> ", publicKeys);
-  const vaultAddress = new dashcore.Address(publicKeys, threshold);
+  const vaultAddress = new dashcore.Address(publicKeys, threshold, "testnet");
   console.log("Vault MultiSig Address: ", vaultAddress.toString());
   const vaultDocument = await submitVaultDocument(client, identity, {
     threshold,

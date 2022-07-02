@@ -62,16 +62,20 @@ const registerContract = async () => {
       ],
       properties: {
         vaultId: { type: "string", maxLength: 63 },
-        utxo: {
-          type: "object",
-          properties: {
-            txId: { type: "string" },
-            outputIndex: { type: "integer" },
-            address: { type: "string" },
-            script: { type: "string" },
-            satoshis: { type: "integer" },
+        utxos: {
+          type: "array",
+          items: {
+            type: "object",
+            required: ["txId", "outputIndex", "address", "script", "satoshis"],
+            properties: {
+              txId: { type: "string" },
+              outputIndex: { type: "integer" },
+              address: { type: "string" },
+              script: { type: "string" },
+              satoshis: { type: "integer" },
+            },
+            additionalProperties: false,
           },
-          additionalProperties: false,
         },
         output: {
           type: "object",
