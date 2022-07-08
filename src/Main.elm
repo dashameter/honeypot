@@ -1,6 +1,8 @@
 port module Main exposing (..)
 
 import Browser
+import DashClient exposing (..)
+import Dict exposing (Dict)
 import Element exposing (..)
 import Element.Background as Background
 import Element.Border as Border
@@ -13,7 +15,10 @@ import Html exposing (Html)
 import Http
 import Json.Decode exposing (Decoder, decodeValue, field, float, int, list, string, succeed)
 import Json.Decode.Pipeline exposing (optional, required, requiredAt)
+import List.Extra exposing (unique)
+import Network exposing (..)
 import Platform.Cmd exposing (Cmd)
+import Time
 import TimeFormat exposing (prettyTime)
 import TransactionList exposing (transactionListView)
 
@@ -25,16 +30,26 @@ import TransactionList exposing (transactionListView)
 type alias CreateVaultArgs =
     { threshold : Int
     , identityIds : List String
+    , network : String
     }
 
 
 port createVault : CreateVaultArgs -> Cmd msg
 
 
+type alias FetchVaultArgs =
+    { network : String
+    }
+
+
+port fetchVaults : FetchVaultArgs -> Cmd msg
+
+
 type alias CreateTransactionArgs =
     { vault : Vault
     , utxos : List UTXO
     , output : Output
+    , network : String
     }
 
 
@@ -42,21 +57,21 @@ port createTransaction : CreateTransactionArgs -> Cmd msg
 
 
 type alias FetchTransactionsArgs =
-    { vaultId : String }
+    { vaultId : String, network : String }
 
 
 port fetchTransactions : FetchTransactionsArgs -> Cmd msg
 
 
 type alias SignTransactionArgs =
-    { transactionId : String }
+    { transactionId : String, network : String }
 
 
 port signTransaction : SignTransactionArgs -> Cmd msg
 
 
 type alias ExecuteTransactionArgs =
-    { transactionId : String }
+    { transactionId : String, network : String }
 
 
 port executeTransaction : ExecuteTransactionArgs -> Cmd msg
@@ -91,6 +106,8 @@ subscriptions _ =
         , getCreatedVaultId ClickedSelectVault
         , getTransactionList GotTransactionList
         , getSignatures GotSignatures
+        , getDashClient GotDashClient
+        , Time.every 50000 PollData
         ]
 
 
@@ -216,11 +233,22 @@ type alias Model =
     , utxoStatus : Status (List UTXO)
     , txHistory : List TxHistoryItem
     , txHistoryStatus : Status (List TxHistoryItem)
+    , dpns : Dict String Dpns
+    , flags : Flags
+    , chosenL1Network : ChosenL1Network
     }
 
 
-initialModel : Model
-initialModel =
+type alias ChosenL1Network =
+    { network : Network, apiHost : String }
+
+
+type alias Flags =
+    { network : Network, apiHostTestnet : String, apiHostMainnet : String }
+
+
+initialModel : Flags -> Model
+initialModel flags =
     { selectedTx = -1
     , vaults = []
     , newVaultThreshold = "2"
@@ -234,12 +262,16 @@ initialModel =
             { address = "yWmaDGGSz1hFxXkVUR6n69E3FqfpQ5qgQn"
             , amount = "100000"
             }
+        , addressIsValid = False
         }
     , transactionList = []
     , signatures = []
     , utxoStatus = Loading
     , txHistory = []
     , txHistoryStatus = Loading
+    , dpns = Dict.empty
+    , flags = flags
+    , chosenL1Network = { network = Testnet, apiHost = flags.apiHostTestnet }
     }
 
 
@@ -258,6 +290,7 @@ type alias Output =
 
 type alias TransactionForm =
     { output : Output
+    , addressIsValid : Bool
     }
 
 
@@ -278,22 +311,28 @@ type Msg
     = ClickedSearchDashName ResultDashName
     | ClickedSelectVault String
     | ClickedNewVaultDashName ResultDashName
+    | CreateVaultPressed
+    | PressedNewTransactionFormCreateTransaction
+    | PressedAddAnotherVault
+    | PressedSignTransaction String
+    | PressedExecuteTransaction String
+    | ChooseL1Network Network
+      --
+    | NewVaultIdentityIdsChanged String
+    | NewVaultThresholdChanged String
+    | SearchDashNameChanged String
+    | ChangedNewTransactionFormOutputAmount String
+    | ChangedNewTransactionFormOutputAddress String
+      --
+    | GotUtxos (Result Http.Error (List UTXO))
+    | GotTxHistory (Result Http.Error (List TxHistoryItem))
+    | GotDashClient Json.Decode.Value
     | GotVaults Json.Decode.Value
     | GotdashNameResults Json.Decode.Value
     | GotTransactionList Json.Decode.Value
     | GotSignatures Json.Decode.Value
-    | NewVaultIdentityIdsChanged String
-    | NewVaultThresholdChanged String
-    | CreateVaultPressed
-    | SearchDashNameChanged String
-    | PressedAddAnotherVault
-    | ChangedNewTransactionFormOutputAmount String
-    | PressedNewTransactionFormCreateTransaction
-    | ChangedNewTransactionFormOutputAddress String
-    | PressedSignTransaction String
-    | PressedExecuteTransaction String
-    | GotUtxos (Result Http.Error (List UTXO))
-    | GotTxHistory (Result Http.Error (List TxHistoryItem))
+      --
+    | PollData Time.Posix
 
 
 digitsOnly : String -> String
@@ -304,6 +343,76 @@ digitsOnly =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        PollData _ ->
+            let
+                cmdFetchVaults =
+                    fetchVaults { network = Network.toString model.chosenL1Network.network }
+
+                cmdFetchTxHistory =
+                    case model.selectedVaultId of
+                        Just _ ->
+                            fetchTxHistory model.chosenL1Network.apiHost (selectedVault model).vaultAddress
+
+                        Nothing ->
+                            Cmd.none
+
+                cmdFetchTransactions =
+                    case model.selectedVaultId of
+                        Just vaultId ->
+                            fetchTransactions
+                                { vaultId = vaultId
+                                , network = Network.toString model.chosenL1Network.network
+                                }
+
+                        Nothing ->
+                            Cmd.none
+
+                cmdFetchUtxos =
+                    case model.selectedVaultId of
+                        Just _ ->
+                            let
+                                vault =
+                                    selectedVault model
+                            in
+                            Http.get
+                                { url = model.chosenL1Network.apiHost ++ "/addr/" ++ vault.vaultAddress ++ "/utxo"
+                                , expect = Http.expectJson GotUtxos (list utxoDecoder)
+                                }
+
+                        Nothing ->
+                            Cmd.none
+            in
+            ( model, Cmd.batch [ cmdFetchVaults, cmdFetchUtxos, cmdFetchTransactions, cmdFetchTxHistory ] )
+
+        ChooseL1Network network ->
+            case network of
+                Testnet ->
+                    let
+                        newModel =
+                            { model | chosenL1Network = { network = network, apiHost = model.flags.apiHostTestnet }, selectedVaultId = Nothing }
+
+                        cmdFetchVaults =
+                            fetchVaults { network = Network.toString newModel.chosenL1Network.network }
+                    in
+                    ( newModel, cmdFetchVaults )
+
+                Mainnet ->
+                    let
+                        newModel =
+                            { model | chosenL1Network = { network = network, apiHost = model.flags.apiHostMainnet }, selectedVaultId = Nothing }
+
+                        cmdFetchVaults =
+                            fetchVaults { network = Network.toString newModel.chosenL1Network.network }
+                    in
+                    ( newModel, Cmd.batch [ cmdFetchVaults ] )
+
+        GotDashClient result ->
+            let
+                newModel =
+                    decodeDashClient model result
+            in
+            ( newModel, Cmd.none )
+
         GotTxHistory (Ok txs) ->
             ( { model | txHistoryStatus = Loaded (List.sortWith descendingTxHistoryTime txs) }, Cmd.none )
 
@@ -319,7 +428,7 @@ update msg model =
         PressedExecuteTransaction transactionId ->
             let
                 cmd =
-                    executeTransaction { transactionId = transactionId }
+                    executeTransaction { transactionId = transactionId, network = Network.toString model.chosenL1Network.network }
             in
             ( model
             , cmd
@@ -328,7 +437,7 @@ update msg model =
         PressedSignTransaction transactionId ->
             let
                 cmd =
-                    signTransaction { transactionId = transactionId }
+                    signTransaction { transactionId = transactionId, network = Network.toString model.chosenL1Network.network }
             in
             ( model
             , cmd
@@ -396,6 +505,7 @@ update msg model =
                         { vault = selectedVault model
                         , utxos = selectedUtxos
                         , output = model.newTransactionForm.output
+                        , network = Network.toString model.chosenL1Network.network
                         }
             in
             ( model
@@ -415,11 +525,14 @@ update msg model =
 
                 newTransactionForm =
                     { oldNewTransactionForm | output = output }
+
+                cmd =
+                    dashClient { cmd = "address.isValid", payload = [ address, Network.toString model.chosenL1Network.network ] }
             in
             ( { model
                 | newTransactionForm = newTransactionForm
               }
-            , Cmd.none
+            , cmd
             )
 
         ChangedNewTransactionFormOutputAmount amount ->
@@ -443,7 +556,16 @@ update msg model =
             )
 
         PressedAddAnotherVault ->
-            ( { model | selectedVaultId = Nothing }, Cmd.none )
+            ( { model
+                | selectedVaultId = Nothing
+                , signatures = []
+                , newVaultThreshold = ""
+                , searchDashName = ""
+                , newVaultDashNames = []
+                , dashNameResults = []
+              }
+            , Cmd.none
+            )
 
         SearchDashNameChanged searchDashName ->
             let
@@ -455,7 +577,7 @@ update msg model =
         CreateVaultPressed ->
             let
                 cmd =
-                    createVault { threshold = Maybe.withDefault -1 (String.toInt model.newVaultThreshold), identityIds = List.map (\name -> name.identityId) model.newVaultDashNames }
+                    createVault { network = Network.toString model.chosenL1Network.network, threshold = Maybe.withDefault -1 (String.toInt model.newVaultThreshold), identityIds = List.map (\name -> name.identityId) model.newVaultDashNames }
             in
             ( model, cmd )
 
@@ -474,10 +596,37 @@ update msg model =
             )
 
         GotVaults vaults ->
-            ( { model
-                | vaults = Result.withDefault [] (decodeValue (list vaultDecoder) vaults)
-              }
-            , Cmd.none
+            let
+                newModel =
+                    { model
+                        | vaults = Result.withDefault [] (decodeValue (list vaultDecoder) vaults)
+                    }
+
+                concat : Vault -> List String
+                concat a =
+                    Debug.log "identityIds concat" a.identityIds
+
+                identityIds =
+                    Debug.log "identityIds" (List.map concat newModel.vaults)
+
+                resultids =
+                    List.map (\vault -> vault.identityIds) newModel.vaults
+                        |> List.foldl (++) []
+                        |> unique
+
+                v =
+                    Debug.log "identityIds result" resultids
+
+                --TODO filter out identityIds that are already in the dpns dict (member)
+                -- create a cmd that sends these identity ids over a port to js
+                -- js resolves the identities to dpns
+                -- subscription reads the dpns and decodes it
+                -- view shows username or #id
+                cmd =
+                    dashClient { cmd = "resolveIdentities", payload = resultids }
+            in
+            ( newModel
+            , cmd
             )
 
         GotdashNameResults dashNameResults ->
@@ -502,6 +651,7 @@ update msg model =
                 cmdFetchTransactions =
                     fetchTransactions
                         { vaultId = vaultId
+                        , network = Network.toString model.chosenL1Network.network
                         }
 
                 newModel =
@@ -513,12 +663,11 @@ update msg model =
                 cmdFetchUtxos =
                     Http.get
                         -- TODO "enable dynamic vault address once dashcore-lib produces testnet addresses"
-                        -- { url = Debug.log "url " "https://testnet-insight.dashevo.org/insight-api/addr/" ++ vault.vaultAddress ++ "/utxo"
-                        { url = Debug.log "url " "https://testnet-insight.dashevo.org/insight-api/addr/" ++ vault.vaultAddress ++ "/utxo"
+                        { url = model.chosenL1Network.apiHost ++ "/addr/" ++ vault.vaultAddress ++ "/utxo"
                         , expect = Http.expectJson GotUtxos (list utxoDecoder)
                         }
             in
-            ( newModel, Cmd.batch [ cmdFetchTransactions, cmdFetchUtxos, cmdFetchTxs vault.vaultAddress ] )
+            ( newModel, Cmd.batch [ cmdFetchTransactions, cmdFetchUtxos, fetchTxHistory model.chosenL1Network.apiHost vault.vaultAddress ] )
 
 
 
@@ -528,21 +677,23 @@ update msg model =
 view : Model -> Html Msg
 view model =
     layout [ Font.size 12, width fill, height fill ] <|
-        column [ width fill, height fill, spacing -1, clip ] [ topBar, mainContent model ]
+        column [ width fill, height fill, spacing -1, clip ] [ topBar model, mainContent model ]
 
 
 menuBackground =
     rgb255 246 247 248
 
 
-topBar =
+topBar model =
     row
         [ width fill
         , paddingXY 4 4
+        , spacingXY 20 20
         ]
         [ Element.paragraph
             [ Element.height Element.shrink
-            , Element.width Element.fill
+            , Element.width Element.shrink
+            , paddingXY 20 0
             , Region.heading 2
             , Font.bold
             , Font.color (Element.rgba255 240 251 255 1)
@@ -553,11 +704,25 @@ topBar =
                 , color = Element.rgba255 24 195 251 1
                 }
             ]
-            [ Element.text "HoneyPot" ]
+            [ Element.text "HoneyPot"
+            ]
         , el
             [ width fill
+            , alignRight
             ]
-            none
+            (Input.radioRow
+                [ padding 10
+                , spacing 20
+                ]
+                { onChange = ChooseL1Network
+                , selected = Just model.chosenL1Network.network
+                , label = Input.labelLeft [ Font.size 18, Font.extraBold, Element.centerY ] (text "L1 Network")
+                , options =
+                    [ Input.option Testnet (text "Testnet")
+                    , Input.option Mainnet (text "Mainnet")
+                    ]
+                }
+            )
         , toolbarButton "Connect Wallet"
         ]
 
@@ -636,7 +801,7 @@ leftMenu model =
                             , Element.width Element.fill
                             ]
                             (List.map
-                                (\name ->
+                                (\identityId ->
                                     el
                                         [ Border.shadow
                                             { offset = ( 0, 5 )
@@ -653,7 +818,9 @@ leftMenu model =
                                         , Border.dashed
                                         , Border.widthXY 5 5
                                         ]
-                                        (Element.text <| String.slice 0 6 name)
+                                        (Element.text <|
+                                            viewDashName identityId model.dpns
+                                        )
                                 )
                                 vault.identityIds
                             )
@@ -1009,7 +1176,13 @@ newTransactionFormView model =
                     , blur = 5
                     , color = Element.rgba255 24 195 251 1
                     }
-                , Background.color (Element.rgba255 240 251 255 1)
+                , Background.color
+                    (if model.newTransactionForm.addressIsValid then
+                        Element.rgba255 240 251 255 1
+
+                     else
+                        Element.rgba255 251 24 24 0.7
+                    )
                 , Element.centerX
                 , Font.family [ Font.typeface "Rubik" ]
                 , Font.size 24
@@ -1044,7 +1217,12 @@ newTransactionFormView model =
                     , blur = 15
                     , color = Element.rgba255 24 164 251 1
                     }
-                , Background.color (Element.rgba255 24 164 251 1)
+                , Background.color <|
+                    if model.newTransactionForm.addressIsValid then
+                        Element.rgba255 24 164 251 1
+
+                    else
+                        Element.rgba255 24 164 251 0.3
                 , Element.centerY
                 , Element.centerX
                 , Font.center
@@ -1237,16 +1415,47 @@ cardItem selectedTx items =
 ---- PROGRAM ----
 
 
-init : ( Model, Cmd Msg )
-init =
-    ( initialModel, Cmd.none )
+buildFlags : String -> String -> String -> Flags
+buildFlags networkString apiHostTestnet apiHostMainnet =
+    let
+        network =
+            case networkString of
+                "mainnet" ->
+                    Mainnet
+
+                "testnet" ->
+                    Testnet
+
+                _ ->
+                    Debug.todo "handle error"
+    in
+    { apiHostTestnet = apiHostTestnet, apiHostMainnet = apiHostMainnet, network = network }
 
 
-main : Program () Model Msg
+flagsDecoder =
+    succeed buildFlags
+        |> required "network" string
+        |> required "apiHostTestnet" string
+        |> required "apiHostMainnet" string
+
+
+init : Json.Decode.Value -> ( Model, Cmd Msg )
+init flags =
+    let
+        decodedFlags =
+            Result.withDefault { network = Testnet, apiHostTestnet = "", apiHostMainnet = "" } (Debug.log "flagdecoder" (decodeValue flagsDecoder flags))
+
+        model =
+            initialModel decodedFlags
+    in
+    ( model, fetchVaults { network = Network.toString model.chosenL1Network.network } )
+
+
+main : Program Json.Decode.Value Model Msg
 main =
     Browser.element
         { view = view
-        , init = \_ -> init
+        , init = init
         , update = update
         , subscriptions = subscriptions
         }
@@ -1258,9 +1467,9 @@ type Status a
     | Errored String
 
 
-apiurl : String -> String
-apiurl address =
-    "https://testnet-insight.dashevo.org/insight-api/addrs/" ++ address ++ "/txs?from=0&to=50"
+apiurl : String -> String -> String
+apiurl apiHost address =
+    apiHost ++ "/addrs/" ++ address ++ "/txs?from=0&to=50"
 
 
 explorerurl =
@@ -1459,12 +1668,20 @@ txHistoryDecoder vaultAddress =
         |> required "vin" (list txHistoryVinDecoder)
 
 
-cmdFetchTxs : String -> Cmd Msg
-cmdFetchTxs vaultAddress =
+fetchTxHistory : String -> String -> Cmd Msg
+fetchTxHistory apiHost vaultAddress =
     Http.get
         -- TODO "enable dynamic vault address once dashcore-lib produces testnet addresses"
         -- TODO "enable pagination"
         -- TODO "enable local/testnet/mainnet"
-        { url = Debug.log "url " (apiurl vaultAddress)
+        { url = Debug.log "url " (apiurl apiHost vaultAddress)
         , expect = Http.expectJson GotTxHistory (field "items" (list (txHistoryDecoder vaultAddress)))
         }
+
+
+recipientBGColor model =
+    if model.newTransactionForm.addressIsValid then
+        Element.rgba255 240 251 255 1
+
+    else
+        Element.rgba255 251 24 24 0.7

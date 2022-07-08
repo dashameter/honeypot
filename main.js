@@ -18,8 +18,21 @@ import axios from "axios";
 
 // Init Elm App
 const root = document.querySelector("#app div");
-const app = Elm.Main.init({ node: root });
+const app = Elm.Main.init({
+  node: root,
+  flags: {
+    apiHostTestnet: import.meta.env.VITE_INSIGHT_API_URL_TESTNET,
+    apiHostMainnet: import.meta.env.VITE_INSIGHT_API_URL_MAINNET,
+    network: import.meta.env.VITE_NETWORK,
+  },
+});
 
+console.log("import.meta.env.MODE :>> ", import.meta.env.MODE);
+console.log("import.meta.env.VITE_NETWORK :>> ", import.meta.env.VITE_NETWORK);
+console.log(
+  "import.meta.env.VITE_HONEYPOT_CONTRACTID :>> ",
+  import.meta.env.VITE_HONEYPOT_CONTRACTID
+);
 // Init Dash SDK
 const dashcore = Dash.Core;
 // import TransactionSignature from "@dashevo/dashcore-lib/lib/transaction/signature.js";
@@ -34,7 +47,7 @@ const client = new Dash.Client(createClientOpts());
 })();
 //7XLWySM6uir3oP2UEvhTAXtts3U74ihWvK
 // Init Data
-fetchVaults();
+// fetchVaults({ network: "testnet" }); // TODO call initial fetch from ELM, supplying the chosen L1 Network
 
 /**
  * @typedef PublicKey
@@ -58,7 +71,11 @@ let Vaults = [];
 let Transactions = [];
 let Signatures = [];
 
-app.ports.executeTransaction.subscribe(async function ({ transactionId }) {
+app.ports.executeTransaction.subscribe(async function ({
+  transactionId,
+  network,
+}) {
+  const apiHost = import.meta.env.VITE_INSIGHT_API_URL_TESTNET; // TODO support switching to mainnet
   const account = await getCachedWalletAccount(client);
 
   const transactionDoc = Transactions.find((tx) => tx.$id === transactionId);
@@ -78,7 +95,7 @@ app.ports.executeTransaction.subscribe(async function ({ transactionId }) {
   const vaultAddress = new dashcore.Address(
     vaultDoc.publicKeys,
     vaultDoc.threshold,
-    "testnet"
+    network
   );
 
   const multiSigTx = new dashcore.Transaction()
@@ -105,7 +122,7 @@ app.ports.executeTransaction.subscribe(async function ({ transactionId }) {
 
   axios
     .post(
-      "https://testnet-insight.dashevo.org/insight-api/tx/send",
+      apiHost + "/tx/send",
       {
         rawtx: multiSigTx.toString(),
       }
@@ -123,7 +140,10 @@ app.ports.executeTransaction.subscribe(async function ({ transactionId }) {
   // console.log("txId :>> ", txId);
 });
 
-app.ports.signTransaction.subscribe(async function ({ transactionId }) {
+app.ports.signTransaction.subscribe(async function ({
+  transactionId,
+  network,
+}) {
   const account = await getCachedWalletAccount(client);
   const identity = await getCachedIdentity(client, account);
   const privateKey = account.identities
@@ -137,6 +157,7 @@ app.ports.signTransaction.subscribe(async function ({ transactionId }) {
     vaultDoc,
     transactionDoc,
     privateKey,
+    network,
   });
   console.log("signatureDoc :>> ", signatureDoc);
 
@@ -164,6 +185,7 @@ app.ports.createTransaction.subscribe(async function ({
   vault,
   utxos,
   output,
+  network,
 }) {
   const account = await getCachedWalletAccount(client);
   const identity = await getCachedIdentity(client, account);
@@ -172,7 +194,12 @@ app.ports.createTransaction.subscribe(async function ({
   console.log("utxos :>> ", utxos);
   console.log("output :>> ", output);
 
-  const transactionDoc = createTransactionDoc({ vault, utxos, output });
+  const transactionDoc = createTransactionDoc({
+    vault,
+    utxos,
+    output,
+    network,
+  });
   const result = await submitTransactionDocument(
     client,
     identity,
@@ -180,20 +207,20 @@ app.ports.createTransaction.subscribe(async function ({
   );
   console.log("result :>> ", result.toJSON());
   // TODO update by vaultId
-  updateTransactions({ vaultId: vault.id });
+  updateTransactions({ vaultId: vault.id, network });
 });
 
-app.ports.fetchTransactions.subscribe(async function ({ vaultId }) {
+app.ports.fetchTransactions.subscribe(async function ({ vaultId, network }) {
   console.log("vaultId :>> ", vaultId);
-  updateTransactions({ vaultId });
+  updateTransactions({ vaultId, network });
 });
 
-async function updateTransactions({ vaultId }) {
-  const transactions = (await fetchTransactions(client, { vaultId })).map(
-    (t) => {
-      return { ...t, id: t.$id };
-    }
-  );
+async function updateTransactions({ vaultId, network }) {
+  const transactions = (
+    await fetchTransactions(client, { vaultId, network })
+  ).map((t) => {
+    return { ...t, id: t.$id };
+  });
   console.log("transactions :>> ", transactions);
 
   // Keep a local cache of transaction docs
@@ -207,7 +234,11 @@ async function updateTransactions({ vaultId }) {
   app.ports.getTransactionList.send(transactions);
 }
 
-app.ports.createVault.subscribe(async function ({ threshold, identityIds }) {
+app.ports.createVault.subscribe(async function ({
+  threshold,
+  identityIds,
+  network,
+}) {
   console.log("threshold :>> ", threshold);
   console.log("identityIds :>> ", identityIds);
   if (
@@ -218,14 +249,20 @@ app.ports.createVault.subscribe(async function ({ threshold, identityIds }) {
     const result = await createVaultFromIdentities({
       threshold,
       identityIds,
+      network,
     });
 
     const vaultId = result.transitions[0].$id;
     app.ports.getCreatedVaultId.send(vaultId);
 
     // Refresh vaults list
-    fetchVaults();
+    // fetchVaults({ network });
   } else console.error("Bad Args");
+});
+
+app.ports.fetchVaults.subscribe(async function ({ network }) {
+  console.log("fetchVaults.subscribe network :>> ", network);
+  fetchVaults({ network });
 });
 
 app.ports.searchDashNames.subscribe(async function (searchDashName) {
@@ -268,7 +305,7 @@ async function fetchPublicKeyForDashName({ identityId, name }) {
   return;
 }
 
-async function fetchVaults() {
+async function fetchVaults({ network }) {
   const account = await client.getWalletAccount();
   const identityId = await account.identities.getIdentityIds()[0];
   console.log("identityId :>> ", identityId);
@@ -289,7 +326,7 @@ async function fetchVaults() {
     const vaultAddress = new dashcore.Address(
       vault.publicKeys,
       vault.threshold,
-      "testnet"
+      network
     ).toString();
     console.log("Vault MultiSig Address: ", vaultAddress);
     return {
@@ -305,7 +342,11 @@ async function fetchVaults() {
   app.ports.getVaults.send(vaultResponse);
 }
 
-const createVaultFromIdentities = async ({ threshold, identityIds }) => {
+const createVaultFromIdentities = async ({
+  threshold,
+  identityIds,
+  network,
+}) => {
   const account = await client.getWalletAccount();
   const address = account.getUnusedAddress();
   console.log("Unused address:", address.address);
@@ -318,7 +359,7 @@ const createVaultFromIdentities = async ({ threshold, identityIds }) => {
     return identity.publicKeys[0].data.toString("hex");
   });
   console.log("publicKeys :>> ", publicKeys);
-  const vaultAddress = new dashcore.Address(publicKeys, threshold, "testnet");
+  const vaultAddress = new dashcore.Address(publicKeys, threshold, network);
   console.log("Vault MultiSig Address: ", vaultAddress.toString());
   const vaultDocument = await submitVaultDocument(client, identity, {
     threshold,
@@ -334,4 +375,40 @@ const createVaultFromIdentities = async ({ threshold, identityIds }) => {
 client.on("error", (error, context) => {
   console.error(`Client error: ${error.name}`);
   console.error(context);
+});
+
+// DashClient Ports
+//
+app.ports.dashClient.subscribe(async function ({ cmd, payload }) {
+  const Address = dashcore.Address;
+  console.log("cmd, payload:>> ", cmd, payload);
+
+  const resolveIdentities = async (identityIds) => {
+    identityIds.map((identityId) => {
+      client.platform.names
+        .resolveByRecord("dashUniqueIdentityId", identityId)
+        .then((results) => {
+          if (results.length > 0) {
+            const result = results[0].toJSON();
+            app.ports.getDashClient.send({ cmd: "resolveIdentities", result });
+          }
+        });
+    });
+  };
+  switch (cmd) {
+    case "resolveIdentities":
+      resolveIdentities(payload);
+      break;
+
+    case "address.isValid":
+      app.ports.getDashClient.send({
+        cmd: "address.isValid",
+        result: Address.isValid(payload[0], payload[1]),
+      });
+      break;
+
+    default: //Default will perform if all case’s fail
+      console.error("Unknown DashClient Cmd.", cmd);
+      break;
+  }
 });

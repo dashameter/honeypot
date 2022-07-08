@@ -55,13 +55,18 @@ const registerContract = async () => {
           unique: false,
         },
         {
-          name: "vaultIdCreatedAt",
-          properties: [{ vaultId: "desc" }, { $createdAt: "desc" }],
+          name: "networkVaultIdCreatedAt",
+          properties: [
+            { network: "asc" },
+            { vaultId: "desc" },
+            { $createdAt: "desc" },
+          ],
           unique: false,
         },
       ],
       properties: {
         vaultId: { type: "string", maxLength: 63 },
+        network: { type: "string", maxLength: 20 },
         utxos: {
           type: "array",
           items: {
@@ -86,7 +91,7 @@ const registerContract = async () => {
           additionalProperties: false,
         },
       },
-      required: ["vaultId", "$createdAt"],
+      required: ["vaultId", "network", "$createdAt"],
       additionalProperties: false,
     },
 
