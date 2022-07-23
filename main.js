@@ -36,9 +36,7 @@ console.log(
 // Init Dash SDK
 const dashcore = Dash.Core;
 // import TransactionSignature from "@dashevo/dashcore-lib/lib/transaction/signature.js";
-console.log("dashcore :>> ", dashcore);
 const TransactionSignature = dashcore.Transaction.Signature;
-console.log("TransactionSignature :>> ", TransactionSignature);
 const client = new Dash.Client(createClientOpts());
 // Init Wallet Account so it's available
 (async function () {
@@ -88,9 +86,9 @@ app.ports.executeTransaction.subscribe(async function ({
     (sig) => sig.transactionId === transactionId
   );
 
-  console.log("transactionDoc :>> ", transactionDoc);
-  console.log("vaultDoc :>> ", vaultDoc);
-  console.log("signatureDocs :>> ", signatureDocs);
+  // console.log("transactionDoc :>> ", transactionDoc);
+  // console.log("vaultDoc :>> ", vaultDoc);
+  // console.log("signatureDocs :>> ", signatureDocs);
 
   const vaultAddress = new dashcore.Address(
     vaultDoc.publicKeys,
@@ -103,12 +101,12 @@ app.ports.executeTransaction.subscribe(async function ({
     .to(transactionDoc.output.address, transactionDoc.output.amount)
     .change(vaultAddress);
 
-  console.log("multiSigTx :>> ", multiSigTx);
+  // console.log("multiSigTx :>> ", multiSigTx);
 
   const txSignatures = signatureDocs.map((sig) =>
     TransactionSignature.fromObject(sig.signature)
   );
-  console.log("txSignatures:>> ", txSignatures);
+  // console.log("txSignatures:>> ", txSignatures);
 
   // assert(multiSigTx.isValidSignature(txSignatures[0]));
   multiSigTx.applySignature(txSignatures[0]);
@@ -116,9 +114,9 @@ app.ports.executeTransaction.subscribe(async function ({
   // assert(multiSigTx.isValidSignature(txSignatures[1]));
   // multiSigTx.applySignature(txSignatures[1]);
 
-  console.log("isFullySigned", multiSigTx.isFullySigned());
-  console.log("multiSigTx", multiSigTx.toString());
-  console.log("multiSigTx :>> ", multiSigTx);
+  // console.log("isFullySigned", multiSigTx.isFullySigned());
+  // console.log("multiSigTx", multiSigTx.toString());
+  // console.log("multiSigTx :>> ", multiSigTx);
 
   axios
     .post(
@@ -159,10 +157,10 @@ app.ports.signTransaction.subscribe(async function ({
     privateKey,
     network,
   });
-  console.log("signatureDoc :>> ", signatureDoc);
+  // console.log("signatureDoc :>> ", signatureDoc);
 
   const result = await submitSignatureDocument(client, identity, signatureDoc);
-  console.log("result :>> ", result);
+  // console.log("result :>> ", result);
   updateSignatures({ transactionIds: [transactionId] });
 });
 async function updateSignatures({ transactionIds }) {
@@ -173,7 +171,7 @@ async function updateSignatures({ transactionIds }) {
     return { ...s, id: s.$id };
   });
 
-  console.log("signatures :>> ", signatures);
+  // console.log("signatures :>> ", signatures);
 
   // Keep a local cache of transaction docs
   Signatures = signatures;
@@ -190,9 +188,9 @@ app.ports.createTransaction.subscribe(async function ({
   const account = await getCachedWalletAccount(client);
   const identity = await getCachedIdentity(client, account);
 
-  console.log("vault :>> ", vault);
-  console.log("utxos :>> ", utxos);
-  console.log("output :>> ", output);
+  // console.log("vault :>> ", vault);
+  // console.log("utxos :>> ", utxos);
+  // console.log("output :>> ", output);
 
   const transactionDoc = createTransactionDoc({
     vault,
@@ -200,38 +198,47 @@ app.ports.createTransaction.subscribe(async function ({
     output,
     network,
   });
+
   const result = await submitTransactionDocument(
     client,
     identity,
     transactionDoc
   );
-  console.log("result :>> ", result.toJSON());
-  // TODO update by vaultId
+
   updateTransactions({ vaultId: vault.id, network });
 });
 
-app.ports.fetchTransactions.subscribe(async function ({ vaultId, network }) {
-  console.log("vaultId :>> ", vaultId);
-  updateTransactions({ vaultId, network });
+app.ports.fetchTransactions.subscribe(async function ({
+  vaultAddress,
+  vaultId,
+  network,
+}) {
+  // console.log("vaultId :>> ", vaultId);
+  updateTransactions({ vaultAddress, vaultId, network });
 });
 
-async function updateTransactions({ vaultId, network }) {
+async function updateTransactions({ vaultAddress, vaultId, network }) {
   const transactions = (
     await fetchTransactions(client, { vaultId, network })
   ).map((t) => {
     return { ...t, id: t.$id };
   });
-  console.log("transactions :>> ", transactions);
+  // console.log("transactions :>> ", transactions);
 
   // Keep a local cache of transaction docs
   Transactions = transactions;
 
   const transactionIds = transactions.map((tx) => tx.$id);
-  console.log("transactionIds :>> ", transactionIds);
+  // console.log("transactionIds :>> ", transactionIds);
 
   updateSignatures({ transactionIds });
 
-  app.ports.getTransactionList.send(transactions);
+  console.log("{ vaultAddress, transactions } :>> ", {
+    vaultAddress,
+    transactions,
+  });
+
+  app.ports.getTransactionQueue.send({ vaultAddress, transactions });
 }
 
 app.ports.createVault.subscribe(async function ({
@@ -239,8 +246,8 @@ app.ports.createVault.subscribe(async function ({
   identityIds,
   network,
 }) {
-  console.log("threshold :>> ", threshold);
-  console.log("identityIds :>> ", identityIds);
+  // console.log("threshold :>> ", threshold);
+  // console.log("identityIds :>> ", identityIds);
   if (
     threshold > 0 &&
     threshold <= identityIds.length &&
@@ -261,12 +268,12 @@ app.ports.createVault.subscribe(async function ({
 });
 
 app.ports.fetchVaults.subscribe(async function ({ network }) {
-  console.log("fetchVaults.subscribe network :>> ", network);
+  // console.log("fetchVaults.subscribe network :>> ", network);
   fetchVaults({ network });
 });
 
 app.ports.searchDashNames.subscribe(async function (searchDashName) {
-  console.log("searchDashName :>> ", searchDashName);
+  // console.log("searchDashName :>> ", searchDashName);
 
   if (searchDashName === "")
     // No search str -> return empty results
@@ -276,7 +283,7 @@ app.ports.searchDashNames.subscribe(async function (searchDashName) {
       await client.platform.names.search(searchDashName, "dash")
     ).map((dpns) => dpns.toJSON());
 
-    console.log("results :>> ", results);
+    // console.log("results :>> ", results);
 
     const dashNameResults = results.map((user) => {
       return { name: user.label, identityId: user.$ownerId };
@@ -284,7 +291,7 @@ app.ports.searchDashNames.subscribe(async function (searchDashName) {
 
     // TODO resolve Identity and store publicKey in global object
 
-    console.log("dashNameResults :>> ", dashNameResults);
+    // console.log("dashNameResults :>> ", dashNameResults);
 
     // Cache the public Keys for the fetched Dash names
     dashNameResults.map(fetchPublicKeyForDashName);
@@ -301,14 +308,14 @@ async function fetchPublicKeyForDashName({ identityId, name }) {
 
   PublicKeys[identityId] = { identityId, name, publicKey };
 
-  console.log("PublicKeys :>> ", PublicKeys);
+  // console.log("PublicKeys :>> ", PublicKeys);
   return;
 }
 
 async function fetchVaults({ network }) {
   const account = await client.getWalletAccount();
   const identityId = await account.identities.getIdentityIds()[0];
-  console.log("identityId :>> ", identityId);
+  // console.log("identityId :>> ", identityId);
 
   const vaults = (
     await client.platform.documents.get("honeypot.vault", {
@@ -317,7 +324,7 @@ async function fetchVaults({ network }) {
       orderBy: [["$createdAt", "desc"]],
     })
   ).map((vault) => vault.toJSON());
-  console.log("vault :>> ", vaults);
+  // console.log("vault :>> ", vaults);
 
   // Keep a local cache of vault docs
   Vaults = vaults;
@@ -328,7 +335,7 @@ async function fetchVaults({ network }) {
       vault.threshold,
       network
     ).toString();
-    console.log("Vault MultiSig Address: ", vaultAddress);
+    // console.log("Vault MultiSig Address: ", vaultAddress);
     return {
       id: vault.$id,
       threshold: vault.threshold,
@@ -337,7 +344,7 @@ async function fetchVaults({ network }) {
       vaultAddress,
     };
   });
-  console.log("vaultResponse :>> ", vaultResponse);
+  // console.log("vaultResponse :>> ", vaultResponse);
   // Send vaults back to elm
   app.ports.getVaults.send(vaultResponse);
 }
@@ -349,18 +356,18 @@ const createVaultFromIdentities = async ({
 }) => {
   const account = await client.getWalletAccount();
   const address = account.getUnusedAddress();
-  console.log("Unused address:", address.address);
+  // console.log("Unused address:", address.address);
   const identity = await getCachedIdentity(client, account);
   const signerIdentities = await Promise.all(
     identityIds.map((identityId) => client.platform.identities.get(identityId))
   );
   const publicKeys = signerIdentities.map((identity) => {
-    console.log("identity :>> ", identity);
+    // console.log("identity :>> ", identity);
     return identity.publicKeys[0].data.toString("hex");
   });
-  console.log("publicKeys :>> ", publicKeys);
+  // console.log("publicKeys :>> ", publicKeys);
   const vaultAddress = new dashcore.Address(publicKeys, threshold, network);
-  console.log("Vault MultiSig Address: ", vaultAddress.toString());
+  // console.log("Vault MultiSig Address: ", vaultAddress.toString());
   const vaultDocument = await submitVaultDocument(client, identity, {
     threshold,
     identityIds,
@@ -381,7 +388,7 @@ client.on("error", (error, context) => {
 //
 app.ports.dashClient.subscribe(async function ({ cmd, payload }) {
   const Address = dashcore.Address;
-  console.log("cmd, payload:>> ", cmd, payload);
+  // console.log("cmd, payload:>> ", cmd, payload);
 
   const resolveIdentities = async (identityIds) => {
     identityIds.map((identityId) => {

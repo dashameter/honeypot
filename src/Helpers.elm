@@ -43,3 +43,9 @@ descendingTxHistoryTime a b =
 
         EQ ->
             EQ
+
+
+type Status a
+    = Loading
+    | Loaded a
+    | Errored String

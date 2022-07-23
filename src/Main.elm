@@ -20,7 +20,7 @@ import Network exposing (..)
 import Platform.Cmd exposing (Cmd)
 import Time
 import TimeFormat exposing (prettyTime)
-import TransactionList exposing (transactionListView)
+import TransactionQueue exposing (transactionQueueView)
 
 
 
@@ -57,7 +57,7 @@ port createTransaction : CreateTransactionArgs -> Cmd msg
 
 
 type alias FetchTransactionsArgs =
-    { vaultId : String, network : String }
+    { vaultAddress : String, vaultId : String, network : String }
 
 
 port fetchTransactions : FetchTransactionsArgs -> Cmd msg
@@ -86,7 +86,7 @@ port getdashNameResults : (Json.Decode.Value -> msg) -> Sub msg
 port getVaults : (Json.Decode.Value -> msg) -> Sub msg
 
 
-port getTransactionList : (Json.Decode.Value -> msg) -> Sub msg
+port getTransactionQueue : (Json.Decode.Value -> msg) -> Sub msg
 
 
 port getSignatures : (Json.Decode.Value -> msg) -> Sub msg
@@ -104,10 +104,10 @@ subscriptions _ =
         [ getVaults GotVaults
         , getdashNameResults GotdashNameResults
         , getCreatedVaultId ClickedSelectVault
-        , getTransactionList GotTransactionList
+        , getTransactionQueue GotTxQueue
         , getSignatures GotSignatures
         , getDashClient GotDashClient
-        , Time.every 50000 PollData
+        , Time.every 5000 PollData
         ]
 
 
@@ -115,7 +115,26 @@ subscriptions _ =
 ------ Decoders
 
 
-type alias TransactionListItem =
+type alias VaultBalance =
+    { balanceSat : Int, txAppearances : Int }
+
+
+vaultBalanceDecoder : Decoder VaultBalance
+vaultBalanceDecoder =
+    succeed VaultBalance
+        |> required "balanceSat" int
+        |> required "txAppearances" int
+
+
+fetchVaultBalance : String -> String -> Cmd Msg
+fetchVaultBalance vaultAddress url =
+    Http.get
+        { url = url
+        , expect = Http.expectJson (GotVaultBalance vaultAddress) vaultBalanceDecoder
+        }
+
+
+type alias TransactionQueueItem =
     { id : String
     , vaultId : String
     , amount : Int
@@ -173,9 +192,9 @@ utxoDecoder =
         |> optional "ts" int 0
 
 
-transactionListDecoder : Decoder TransactionListItem
-transactionListDecoder =
-    succeed TransactionListItem
+transactionQueueDecoder : Decoder TransactionQueueItem
+transactionQueueDecoder =
+    succeed TransactionQueueItem
         |> required "id" string
         |> required "vaultId" string
         |> requiredAt [ "output", "amount" ] int
@@ -222,21 +241,33 @@ type alias Model =
     { selectedTx : Int
     , selectedVaultId : Maybe String
     , vaults : List Vault
+    , vaultsByAddress : Dict String VaultByAddress
     , newVaultIdentityIds : String
     , newVaultDashNames : List ResultDashName
-    , newVaultThreshold : String
+    , newVaultThreshold : Int
     , searchDashName : String
     , dashNameResults : List ResultDashName
     , newTransactionForm : TransactionForm
-    , transactionList : List TransactionListItem
     , signatures : List Signature
-    , utxoStatus : Status (List UTXO)
-    , txHistory : List TxHistoryItem
-    , txHistoryStatus : Status (List TxHistoryItem)
     , dpns : Dict String Dpns
     , flags : Flags
     , chosenL1Network : ChosenL1Network
     }
+
+
+type alias VaultByAddress =
+    { balanceSat : Int
+    , txAppearances : Int
+    , utxoStatus : Status (List UTXO)
+    , vault : Status Vault
+    , txHistoryStatus : Status (List TxHistoryItem)
+    , txQueueStatus : Status (List TransactionQueueItem)
+    }
+
+
+initVaultByAddress : VaultByAddress
+initVaultByAddress =
+    { balanceSat = 0, txAppearances = 0, utxoStatus = Loading, vault = Loading, txHistoryStatus = Loading, txQueueStatus = Loading }
 
 
 type alias ChosenL1Network =
@@ -251,7 +282,8 @@ initialModel : Flags -> Model
 initialModel flags =
     { selectedTx = -1
     , vaults = []
-    , newVaultThreshold = "2"
+    , vaultsByAddress = Dict.empty
+    , newVaultThreshold = 1
     , newVaultIdentityIds = "hi\nho"
     , newVaultDashNames = []
     , searchDashName = ""
@@ -264,11 +296,7 @@ initialModel flags =
             }
         , addressIsValid = False
         }
-    , transactionList = []
     , signatures = []
-    , utxoStatus = Loading
-    , txHistory = []
-    , txHistoryStatus = Loading
     , dpns = Dict.empty
     , flags = flags
     , chosenL1Network = { network = Testnet, apiHost = flags.apiHostTestnet }
@@ -303,6 +331,15 @@ filteredDashNameResults model =
     List.filter (\name -> not (List.member name model.newVaultDashNames)) model.dashNameResults
 
 
+viewVaultBalance vaultAddress model =
+    case Dict.get vaultAddress model.vaultsByAddress of
+        Just vaultBalance ->
+            duffsToDashString vaultBalance.balanceSat ++ " Dash"
+
+        Nothing ->
+            "Loading .."
+
+
 
 ---- UPDATE ----
 
@@ -324,12 +361,13 @@ type Msg
     | ChangedNewTransactionFormOutputAmount String
     | ChangedNewTransactionFormOutputAddress String
       --
-    | GotUtxos (Result Http.Error (List UTXO))
-    | GotTxHistory (Result Http.Error (List TxHistoryItem))
+    | GotUtxos String (Result Http.Error (List UTXO))
+    | GotTxQueue Json.Decode.Value
+    | GotTxHistory String (Result Http.Error (List TxHistoryItem))
+    | GotVaultBalance String (Result Http.Error VaultBalance)
     | GotDashClient Json.Decode.Value
     | GotVaults Json.Decode.Value
     | GotdashNameResults Json.Decode.Value
-    | GotTransactionList Json.Decode.Value
     | GotSignatures Json.Decode.Value
       --
     | PollData Time.Posix
@@ -343,8 +381,42 @@ digitsOnly =
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
+        GotVaultBalance vaultAddress vaultBalance ->
+            let
+                -- TODO wrap vaultBalance in Status to handle errors
+                vaultBalanceWithDefault =
+                    Result.withDefault { balanceSat = 0, txAppearances = 0 } vaultBalance
+
+                oldVaultByAddress =
+                    Dict.get vaultAddress model.vaultsByAddress
+
+                newVaultByAddress =
+                    case oldVaultByAddress of
+                        Just vaultByAddress ->
+                            { vaultByAddress | balanceSat = vaultBalanceWithDefault.balanceSat, txAppearances = vaultBalanceWithDefault.txAppearances }
+
+                        Nothing ->
+                            { initVaultByAddress | balanceSat = vaultBalanceWithDefault.balanceSat, txAppearances = vaultBalanceWithDefault.txAppearances }
+
+                newModel =
+                    { model | vaultsByAddress = Dict.insert vaultAddress newVaultByAddress model.vaultsByAddress }
+            in
+            ( newModel, Cmd.none )
+
         PollData _ ->
             let
+                -- fetch balances for all vaults
+                cmdFetchVaultBalances =
+                    List.map
+                        (\vault ->
+                            let
+                                url =
+                                    model.chosenL1Network.apiHost ++ "/addrs/" ++ vault.vaultAddress ++ "/?noTxList=1"
+                            in
+                            fetchVaultBalance vault.vaultAddress url
+                        )
+                        model.vaults
+
                 cmdFetchVaults =
                     fetchVaults { network = Network.toString model.chosenL1Network.network }
 
@@ -362,6 +434,7 @@ update msg model =
                             fetchTransactions
                                 { vaultId = vaultId
                                 , network = Network.toString model.chosenL1Network.network
+                                , vaultAddress = (selectedVault model).vaultAddress
                                 }
 
                         Nothing ->
@@ -376,13 +449,13 @@ update msg model =
                             in
                             Http.get
                                 { url = model.chosenL1Network.apiHost ++ "/addr/" ++ vault.vaultAddress ++ "/utxo"
-                                , expect = Http.expectJson GotUtxos (list utxoDecoder)
+                                , expect = Http.expectJson (GotUtxos vault.vaultAddress) (list utxoDecoder)
                                 }
 
                         Nothing ->
                             Cmd.none
             in
-            ( model, Cmd.batch [ cmdFetchVaults, cmdFetchUtxos, cmdFetchTransactions, cmdFetchTxHistory ] )
+            ( model, Cmd.batch ([ cmdFetchVaults, cmdFetchUtxos, cmdFetchTransactions, cmdFetchTxHistory ] ++ cmdFetchVaultBalances) )
 
         ChooseL1Network network ->
             case network of
@@ -413,17 +486,77 @@ update msg model =
             in
             ( newModel, Cmd.none )
 
-        GotTxHistory (Ok txs) ->
-            ( { model | txHistoryStatus = Loaded (List.sortWith descendingTxHistoryTime txs) }, Cmd.none )
+        GotTxHistory vaultAddress (Ok txs) ->
+            let
+                oldVaultByAddress =
+                    Dict.get vaultAddress model.vaultsByAddress
 
-        GotTxHistory (Err httpError) ->
-            ( { model | txHistoryStatus = Errored "Insight API Error!" }, Cmd.none )
+                newVaultByAddress =
+                    case oldVaultByAddress of
+                        Just vaultByAddress ->
+                            { vaultByAddress | txHistoryStatus = Loaded (List.sortWith descendingTxHistoryTime txs) }
 
-        GotUtxos (Ok utxos) ->
-            ( { model | utxoStatus = Loaded (List.sortWith descendingUtxo utxos) }, Cmd.none )
+                        Nothing ->
+                            { initVaultByAddress | txHistoryStatus = Loaded (List.sortWith descendingTxHistoryTime txs) }
 
-        GotUtxos (Err httpError) ->
-            ( { model | utxoStatus = Errored "Insight API Error!" }, Cmd.none )
+                newModel =
+                    { model | vaultsByAddress = Dict.insert vaultAddress newVaultByAddress model.vaultsByAddress }
+            in
+            ( newModel, Cmd.none )
+
+        GotTxHistory vaultAddress (Err httpError) ->
+            let
+                oldVaultByAddress =
+                    Dict.get vaultAddress model.vaultsByAddress
+
+                newVaultByAddress =
+                    case oldVaultByAddress of
+                        Just vaultByAddress ->
+                            { vaultByAddress | txHistoryStatus = Errored "Insight API Error!" }
+
+                        Nothing ->
+                            { initVaultByAddress | txHistoryStatus = Errored "Insight API Error!" }
+
+                newModel =
+                    { model | vaultsByAddress = Dict.insert vaultAddress newVaultByAddress model.vaultsByAddress }
+            in
+            ( newModel, Cmd.none )
+
+        GotUtxos vaultAddress (Ok utxos) ->
+            let
+                oldVaultByAddress =
+                    Dict.get vaultAddress model.vaultsByAddress
+
+                newVaultByAddress =
+                    case oldVaultByAddress of
+                        Just vaultByAddress ->
+                            { vaultByAddress | utxoStatus = Loaded (List.sortWith descendingUtxo utxos) }
+
+                        Nothing ->
+                            { initVaultByAddress | utxoStatus = Loaded (List.sortWith descendingUtxo utxos) }
+
+                newModel =
+                    { model | vaultsByAddress = Dict.insert vaultAddress newVaultByAddress model.vaultsByAddress }
+            in
+            ( newModel, Cmd.none )
+
+        GotUtxos vaultAddress (Err httpError) ->
+            let
+                oldVaultByAddress =
+                    Dict.get vaultAddress model.vaultsByAddress
+
+                newVaultByAddress =
+                    case oldVaultByAddress of
+                        Just vaultByAddress ->
+                            { vaultByAddress | utxoStatus = Errored "Insight API Error!" }
+
+                        Nothing ->
+                            { initVaultByAddress | utxoStatus = Errored "Insight API Error!" }
+
+                newModel =
+                    { model | vaultsByAddress = Dict.insert vaultAddress newVaultByAddress model.vaultsByAddress }
+            in
+            ( newModel, Cmd.none )
 
         PressedExecuteTransaction transactionId ->
             let
@@ -450,12 +583,30 @@ update msg model =
             in
             ( newModel, Cmd.none )
 
-        GotTransactionList transactionList ->
+        GotTxQueue transactionQueue ->
             let
-                newModel =
-                    { model | transactionList = Result.withDefault [] (decodeValue (list transactionListDecoder) transactionList) }
+                maybeVaultAddress =
+                    decodeValue (field "vaultAddress" string) transactionQueue
             in
-            ( newModel, Cmd.none )
+            case maybeVaultAddress of
+                Ok vaultAddress ->
+                    let
+                        oldVaultByAddress =
+                            Dict.get vaultAddress model.vaultsByAddress
+
+                        newVaultByAddress =
+                            case oldVaultByAddress of
+                                Just vaultByAddress ->
+                                    { vaultByAddress | txQueueStatus = Loaded <| Result.withDefault [] (decodeValue (field "transactions" (list transactionQueueDecoder)) transactionQueue) }
+
+                                Nothing ->
+                                    { initVaultByAddress | txQueueStatus = Loaded <| Result.withDefault [] (decodeValue (field "transactions" (list transactionQueueDecoder)) transactionQueue) }
+                    in
+                    ( { model | vaultsByAddress = Dict.insert vaultAddress newVaultByAddress model.vaultsByAddress }, Cmd.none )
+
+                Err _ ->
+                    -- TODO log error, vaultAddress must always be present
+                    ( model, Cmd.none )
 
         PressedNewTransactionFormCreateTransaction ->
             let
@@ -493,7 +644,11 @@ update msg model =
                         accUtxos
 
                 selectedUtxos =
-                    case model.utxoStatus of
+                    case
+                        (Maybe.withDefault initVaultByAddress <|
+                            Dict.get (selectedVault model).vaultAddress model.vaultsByAddress
+                        ).utxoStatus
+                    of
                         Loaded utxos ->
                             selectEnoughUtxos (Maybe.withDefault 0 (String.toInt model.newTransactionForm.output.amount)) utxos 0 []
 
@@ -559,7 +714,7 @@ update msg model =
             ( { model
                 | selectedVaultId = Nothing
                 , signatures = []
-                , newVaultThreshold = ""
+                , newVaultThreshold = 1
                 , searchDashName = ""
                 , newVaultDashNames = []
                 , dashNameResults = []
@@ -577,7 +732,7 @@ update msg model =
         CreateVaultPressed ->
             let
                 cmd =
-                    createVault { network = Network.toString model.chosenL1Network.network, threshold = Maybe.withDefault -1 (String.toInt model.newVaultThreshold), identityIds = List.map (\name -> name.identityId) model.newVaultDashNames }
+                    createVault { network = Network.toString model.chosenL1Network.network, threshold = model.newVaultThreshold, identityIds = List.map (\name -> name.identityId) model.newVaultDashNames }
             in
             ( model, cmd )
 
@@ -590,7 +745,7 @@ update msg model =
 
         NewVaultThresholdChanged newVaultThreshold ->
             ( { model
-                | newVaultThreshold = digitsOnly newVaultThreshold
+                | newVaultThreshold = Maybe.withDefault 0 (String.toInt (digitsOnly newVaultThreshold))
               }
             , Cmd.none
             )
@@ -652,6 +807,7 @@ update msg model =
                     fetchTransactions
                         { vaultId = vaultId
                         , network = Network.toString model.chosenL1Network.network
+                        , vaultAddress = (selectedVault model).vaultAddress
                         }
 
                 newModel =
@@ -664,7 +820,7 @@ update msg model =
                     Http.get
                         -- TODO "enable dynamic vault address once dashcore-lib produces testnet addresses"
                         { url = model.chosenL1Network.apiHost ++ "/addr/" ++ vault.vaultAddress ++ "/utxo"
-                        , expect = Http.expectJson GotUtxos (list utxoDecoder)
+                        , expect = Http.expectJson (GotUtxos vault.vaultAddress) (list utxoDecoder)
                         }
             in
             ( newModel, Cmd.batch [ cmdFetchTransactions, cmdFetchUtxos, fetchTxHistory model.chosenL1Network.apiHost vault.vaultAddress ] )
@@ -795,6 +951,17 @@ leftMenu model =
                                     ++ String.slice 0 16 vault.vaultAddress
                                     ++ ".."
                             )
+                        , Element.wrappedRow
+                            [ Element.spacingXY 12 12
+                            , Element.height Element.shrink
+                            , Element.width Element.fill
+                            , Font.size 14
+                            , Font.bold
+                            , Font.color (rgb255 0 103 138)
+
+                            -- , Font.color
+                            ]
+                            [ text (viewVaultBalance vault.vaultAddress model) ]
                         , Element.wrappedRow
                             [ Element.spacingXY 12 12
                             , Element.height Element.shrink
@@ -945,7 +1112,12 @@ resultDashNameOutput model =
                 , Element.width Element.fill
                 , Region.heading 2
                 ]
-                [ Element.text ("Signers: " ++ String.fromInt (List.length model.newVaultDashNames)) ]
+                [ el [] (text "Signers: ")
+                , el
+                    [ inputColorValid (isNewVaultSignersValid model)
+                    ]
+                    (text (String.fromInt (List.length model.newVaultDashNames)))
+                ]
             ]
         , wrappedRow [ width (px 250), centerX, spacingXY 12 12, paddingXY 12 12 ]
             (List.map
@@ -1037,7 +1209,7 @@ newVaultCard model =
                             , blur = 5
                             , color = Element.rgba255 24 195 251 1
                             }
-                        , Background.color (Element.rgba255 240 251 255 1)
+                        , inputColorValid (isNewVaultThresholdValid model)
                         , Font.family [ Font.typeface "Rubik" ]
                         , Element.paddingEach
                             { top = 8, right = 8, bottom = 8, left = 8 }
@@ -1053,7 +1225,7 @@ newVaultCard model =
                         , Element.width (Element.shrink |> Element.maximum 100)
                         ]
                         { onChange = NewVaultThresholdChanged
-                        , text = model.newVaultThreshold
+                        , text = String.fromInt model.newVaultThreshold
                         , placeholder = Nothing
                         , label =
                             Input.labelAbove
@@ -1069,7 +1241,6 @@ newVaultCard model =
                             , blur = 15
                             , color = Element.rgba255 24 164 251 1
                             }
-                        , Background.color (Element.rgba255 24 164 251 1)
                         , Element.centerY
                         , Element.centerX
                         , Font.center
@@ -1079,13 +1250,48 @@ newVaultCard model =
                         , Border.color (Element.rgba255 24 164 251 1)
                         , Border.solid
                         , Border.widthXY 1 1
+                        , if isNewVaultValid model then
+                            btnEnabledColor
+
+                          else
+                            btnDisabledColor
                         , mouseOver [ Background.color (Element.rgba255 24 195 251 1) ]
                         ]
-                        { onPress = Just CreateVaultPressed, label = Element.text "Create Vault" }
+                        { onPress =
+                            if isNewVaultValid model then
+                                Just CreateVaultPressed
+
+                            else
+                                Nothing
+                        , label = Element.text "Create Vault"
+                        }
                     )
                 ]
             ]
         ]
+
+
+isNewVaultThresholdValid : Model -> Bool
+isNewVaultThresholdValid model =
+    model.newVaultThreshold > 0 && model.newVaultThreshold <= List.length model.newVaultDashNames
+
+
+isNewVaultSignersValid : Model -> Bool
+isNewVaultSignersValid model =
+    List.length model.newVaultDashNames > 0
+
+
+isNewVaultValid : Model -> Bool
+isNewVaultValid model =
+    isNewVaultSignersValid model && isNewVaultThresholdValid model
+
+
+btnDisabledColor =
+    Background.color (Element.rgba255 24 164 251 0.6)
+
+
+btnEnabledColor =
+    Background.color (Element.rgba255 24 164 251 1)
 
 
 transactionCards model =
@@ -1116,8 +1322,8 @@ transactionCards model =
             )
         , vaultDashboard model
         , newTransactionFormView model
-        , transactionListView model (selectedVault model) ( PressedSignTransaction, PressedExecuteTransaction )
-        , transactionHistoryListView model
+        , transactionQueueView model (selectedVault model) initVaultByAddress ( PressedSignTransaction, PressedExecuteTransaction )
+        , transactionHistoryView model
         ]
 
 
@@ -1176,13 +1382,7 @@ newTransactionFormView model =
                     , blur = 5
                     , color = Element.rgba255 24 195 251 1
                     }
-                , Background.color
-                    (if model.newTransactionForm.addressIsValid then
-                        Element.rgba255 240 251 255 1
-
-                     else
-                        Element.rgba255 251 24 24 0.7
-                    )
+                , inputColorValid model.newTransactionForm.addressIsValid
                 , Element.centerX
                 , Font.family [ Font.typeface "Rubik" ]
                 , Font.size 24
@@ -1241,6 +1441,16 @@ newTransactionFormView model =
                 }
             ]
         ]
+
+
+inputColorValid isValid =
+    Background.color
+        (if isValid then
+            Element.rgba255 240 251 255 1
+
+         else
+            Element.rgba255 251 24 24 0.7
+        )
 
 
 
@@ -1333,7 +1543,11 @@ vaultDashboard model =
             ]
             (text
                 ("Balance: "
-                    ++ (case model.utxoStatus of
+                    ++ (case
+                            (Maybe.withDefault initVaultByAddress <|
+                                Dict.get (selectedVault model).vaultAddress model.vaultsByAddress
+                            ).utxoStatus
+                        of
                             Loaded utxos ->
                                 duffsToDashString (List.foldl (+) 0 (List.map (\t -> t.satoshis) utxos)) ++ " Dash"
 
@@ -1360,7 +1574,11 @@ vaultDashboard model =
             , Element.width Element.fill
             ]
           <|
-            case model.utxoStatus of
+            case
+                (Maybe.withDefault initVaultByAddress <|
+                    Dict.get (selectedVault model).vaultAddress model.vaultsByAddress
+                ).utxoStatus
+            of
                 Loaded utxos ->
                     List.map (\utxo -> row [] [ textColumn [] [ text (duffsToDashString utxo.satoshis ++ ", Dash "), text ("vout: " ++ String.fromInt utxo.vout), text ("txId: " ++ utxo.txid) ] ]) utxos
 
@@ -1448,7 +1666,7 @@ init flags =
         model =
             initialModel decodedFlags
     in
-    ( model, fetchVaults { network = Network.toString model.chosenL1Network.network } )
+    ( model, Cmd.batch [ fetchVaults { network = Network.toString model.chosenL1Network.network } ] )
 
 
 main : Program Json.Decode.Value Model Msg
@@ -1459,12 +1677,6 @@ main =
         , update = update
         , subscriptions = subscriptions
         }
-
-
-type Status a
-    = Loading
-    | Loaded a
-    | Errored String
 
 
 apiurl : String -> String -> String
@@ -1495,7 +1707,7 @@ type alias TxHistoryItem =
     }
 
 
-transactionHistoryListView model =
+transactionHistoryView model =
     column
         [ spacingXY 0 8
         , centerX
@@ -1515,7 +1727,11 @@ transactionHistoryListView model =
             , width fill
             ]
             [ text "Transaction History" ]
-            :: (case model.txHistoryStatus of
+            :: (case
+                    (Maybe.withDefault initVaultByAddress <|
+                        Dict.get (selectedVault model).vaultAddress model.vaultsByAddress
+                    ).txHistoryStatus
+                of
                     Loaded txs ->
                         List.map
                             (\tx ->
@@ -1675,7 +1891,7 @@ fetchTxHistory apiHost vaultAddress =
         -- TODO "enable pagination"
         -- TODO "enable local/testnet/mainnet"
         { url = Debug.log "url " (apiurl apiHost vaultAddress)
-        , expect = Http.expectJson GotTxHistory (field "items" (list (txHistoryDecoder vaultAddress)))
+        , expect = Http.expectJson (GotTxHistory vaultAddress) (field "items" (list (txHistoryDecoder vaultAddress)))
         }
 
 
